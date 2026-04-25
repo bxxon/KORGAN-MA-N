@@ -84,3 +84,4 @@ git push -u origin main
 - Gerekirse bunlar icin ileride `Git LFS` kullanilabilir.
 - `main` branch'e dogrudan deneysel degisiklik yapma.
 - Her buyuk adimi ayri commit ile kaydetmek geri donusu cok kolaylastirir.
+- Bu repoda `post-commit` hook kullanilarak her yeni commit'ten sonra otomatik `git push` denenir.

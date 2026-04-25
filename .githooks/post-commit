@@ -1,0 +1,13 @@
+#!/bin/sh
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || exit 0
+
+if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+    exit 0
+fi
+
+if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    git push >/dev/null 2>&1 || echo "[git-auto-push] Push basarisiz. Baglantiyi veya girisi kontrol et."
+else
+    git push -u origin "$branch" >/dev/null 2>&1 || echo "[git-auto-push] Ilk push basarisiz. Baglantiyi veya girisi kontrol et."
+fi
