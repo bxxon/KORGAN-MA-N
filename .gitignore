@@ -1,0 +1,16 @@
+.vscode/
+__pycache__/
+*.pyc
+
+*.obj
+*.ilk
+*.pdb
+*.exe
+
+telemetri_log.txt
+
+c_cpp_properties.json
+
+*.onnx
+*.pt
+deliverables/*.zip

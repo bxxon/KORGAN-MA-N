@@ -1,0 +1,145 @@
+{
+  "manifest_version": "1.0",
+  "package_name": "korgan-yolov8n-onnxruntime-cpu",
+  "created_utc": "2026-04-21T00:00:00Z",
+  "task": "object-detection",
+  "files": {
+    "model": "model.onnx",
+    "labels": "labels.txt"
+  },
+  "runtime": {
+    "engine": "onnxruntime",
+    "minimum_version": "1.21.1",
+    "execution_providers": [
+      "CPUExecutionProvider"
+    ],
+    "verified_load": true,
+    "verified_on": "2026-04-21",
+    "verified_session": {
+      "inputs": [
+        {
+          "name": "images",
+          "shape": [
+            1,
+            3,
+            640,
+            640
+          ],
+          "dtype": "tensor(float)"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output0",
+          "shape": [
+            1,
+            84,
+            8400
+          ],
+          "dtype": "tensor(float)"
+        }
+      ]
+    }
+  },
+  "model": {
+    "format": "ONNX",
+    "producer": {
+      "name": "pytorch",
+      "version": "2.7.1"
+    },
+    "ir_version": 7,
+    "opset_imports": [
+      {
+        "domain": "ai.onnx",
+        "version": 12
+      }
+    ],
+    "sha256": "59d4bd673073651a31b56d0f5a207b60a98867742fd389242781a8ccb90d31b9",
+    "class_count": 80,
+    "labels_source": "labels.txt"
+  },
+  "preprocessing": {
+    "color_order": "RGB",
+    "input_layout": "NCHW",
+    "input_tensor_name": "images",
+    "input_dtype": "float32",
+    "input_size": [
+      640,
+      640
+    ],
+    "resize": {
+      "mode": "direct",
+      "keep_aspect_ratio": false
+    },
+    "normalization": {
+      "scale": 0.00392156862745098,
+      "formula": "pixel / 255.0"
+    }
+  },
+  "output_format": {
+    "raw_output_name": "output0",
+    "raw_output_shape": [
+      1,
+      84,
+      8400
+    ],
+    "raw_layout": "[batch, channels, candidates]",
+    "decode": {
+      "transpose_to": [
+        8400,
+        84
+      ],
+      "candidate_vector_layout": [
+        {
+          "index_range": [
+            0,
+            3
+          ],
+          "name": "bbox_cxcywh",
+          "description": "Bounding box in [center_x, center_y, width, height] pixel coordinates on the resized 640x640 input image."
+        },
+        {
+          "index_range": [
+            4,
+            83
+          ],
+          "name": "class_scores",
+          "description": "80 per-class confidence scores aligned 1:1 with labels.txt."
+        }
+      ],
+      "class_id_rule": "argmax(class_scores)",
+      "confidence_rule": "max(class_scores)",
+      "bbox_conversion": "Convert [cx, cy, w, h] to the consumer's preferred box format such as [x1, y1, x2, y2] or [x, y, w, h].",
+      "scale_back_rule": "If the source image is not 640x640, rescale decoded box coordinates from model input space back to the original image size.",
+      "nms_required": true,
+      "nms_in_model": false
+    },
+    "decoded_detection_object": {
+      "fields": [
+        {
+          "name": "class_id",
+          "type": "int32"
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "source": "labels.txt[class_id]"
+        },
+        {
+          "name": "confidence",
+          "type": "float32"
+        },
+        {
+          "name": "bbox_xyxy",
+          "type": "float32[4]",
+          "order": [
+            "x1",
+            "y1",
+            "x2",
+            "y2"
+          ]
+        }
+      ]
+    }
+  }
+}
