@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Scripts">
+      <UniqueIdentifier>{001F8B40-4567-43F8-AB31-FF44AAB5A621}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Config">
+      <UniqueIdentifier>{E314271B-9476-4A72-8D16-BCA5D8B4B69D}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Deliverables">
+      <UniqueIdentifier>{B6E5F23F-27FA-4588-B8C0-851D2A0F58EE}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Docs">
+      <UniqueIdentifier>{01A0C567-8B10-45E7-BF98-03238B55B89D}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md">
+      <Filter>Docs</Filter>
+    </None>
+    <None Include="PROJECT_ROADMAP.md">
+      <Filter>Docs</Filter>
+    </None>
+    <None Include="config\runtime_config.json">
+      <Filter>Config</Filter>
+    </None>
+    <None Include="deliverables\labels.txt">
+      <Filter>Deliverables</Filter>
+    </None>
+    <None Include="deliverables\model-manifest.json">
+      <Filter>Deliverables</Filter>
+    </None>
+    <None Include="scripts\build_opencv.bat">
+      <Filter>Scripts</Filter>
+    </None>
+    <None Include="scripts\ort_worker.py">
+      <Filter>Scripts</Filter>
+    </None>
+    <None Include="scripts\run_opencv.bat">
+      <Filter>Scripts</Filter>
+    </None>
+  </ItemGroup>
+</Project>
