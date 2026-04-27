@@ -10,9 +10,11 @@ Bu repo, projeyi tekrar derlemek, calistirmak, gelistirmek ve GitHub uzerinden d
 - Her frame'i Python tabanli ONNX Runtime worker surecine yollar.
 - YOLOv8 ONNX modeli ile nesne tespiti yapar.
 - Sonuclari tekrar C++ tarafina alir.
-- Kalman tabanli basit bir takip mekanizmasi ile nesneleri track eder.
+- ByteTrack mantigindan esinlenen iki asamali bir tracker ile daha kararlı takip yapar.
 - Oncelikli hedef secerek ekranda odak durumunu gosterir.
-- Telemetri bilgisini hem terminalde hem `telemetri_log.txt` dosyasinda yazar.
+- Telemetri bilgisini terminalde ve JSONL log dosyalarinda yazar.
+- Worker hatalarinda kontrollu yeniden baslatma dener.
+- Istenirse overlay goruntusunu video olarak kaydeder.
 
 Varsayilan takip edilen siniflar:
 
@@ -50,6 +52,8 @@ Calisma akisi kisaca soyledir:
 
 ```text
 KORGAN/
+|- config/
+|  `- runtime_config.json
 |- main.cpp
 |- scripts/
 |  |- build_opencv.bat
@@ -63,6 +67,11 @@ KORGAN/
 |     |- model.onnx
 |     |- labels.txt
 |     `- model-manifest.json
+|- tests/
+|  `- test_runtime_files.py
+|- .github/
+|  `- workflows/
+|     `- ci.yml
 |- GIT_WORKFLOW.md
 `- .gitignore
 ```
@@ -72,10 +81,13 @@ Dosyalarin ne oldugu:
 - [main.cpp](/C:/Users/askan/Desktop/KORGAN/main.cpp:1): Ana uygulama. Kamera, takip, cizim, telemetry, worker haberlesmesi burada.
 - [scripts/ort_worker.py](/C:/Users/askan/Desktop/KORGAN/scripts/ort_worker.py:1): ONNX Runtime worker. Model yukleme, preprocess, inference ve NMS burada.
 - [scripts/build_opencv.bat](/C:/Users/askan/Desktop/KORGAN/scripts/build_opencv.bat:1): MSVC + OpenCV ile `main.cpp` dosyasini `hss_sistem.exe` olarak derler.
-- [scripts/run_opencv.bat](/C:/Users/askan/Desktop/KORGAN/scripts/run_opencv.bat:1): Gerekli PATH ayarlarini yapip uygulamayi baslatir.
+- [scripts/run_opencv.bat](/C:/Users/askan/Desktop/KORGAN/scripts/run_opencv.bat:1): Gerekli PATH ayarlarini yapip uygulamayi baslatir, ek argumanlari da iletir.
+- [config/runtime_config.json](/C:/Users/askan/Desktop/KORGAN/config/runtime_config.json:1): Runtime ayarlari, threshold'lar, klasorler ve yeniden baslatma davranisi burada.
 - [deliverables/model-manifest.json](/C:/Users/askan/Desktop/KORGAN/deliverables/model-manifest.json:1): Model paketi tanimi.
 - [deliverables/labels.txt](/C:/Users/askan/Desktop/KORGAN/deliverables/labels.txt:1): Sinif isimleri.
 - [deliverables/onnxruntime_cpu_package/model-manifest.json](/C:/Users/askan/Desktop/KORGAN/deliverables/onnxruntime_cpu_package/model-manifest.json:1): Uygulamanin varsayilan olarak kullandigi paket manifesti.
+- [tests/test_runtime_files.py](/C:/Users/askan/Desktop/KORGAN/tests/test_runtime_files.py:1): Config ve manifest dogrulama testleri.
+- [.github/workflows/ci.yml](/C:/Users/askan/Desktop/KORGAN/.github/workflows/ci.yml:1): GitHub Actions CI tanimi.
 - [GIT_WORKFLOW.md](/C:/Users/askan/Desktop/KORGAN/GIT_WORKFLOW.md:1): Branch, commit ve GitHub calisma duzeni.
 
 ## Gereksinimler
@@ -108,6 +120,52 @@ $env:KORGAN_PYTHON="C:\tam\yol\python.exe"
 ```
 
 Kod, bu degiskeni once kontrol eder. Ayrica `python.exe` PATH uzerindeyse onu da kullanabilir.
+
+## Yeni runtime ozellikleri
+
+Son guncellemelerle birlikte proje daha operasyonel bir yapiya tasinmistir:
+
+- config dosyasi uzerinden ayar yonetimi
+- CLI argumanlari ile kamera, paket, log ve recording kontrolu
+- ByteTrack mantigina yakin iki asamali association akisi
+- worker hata verirse sinirli sayida otomatik yeniden baslatma
+- kamera frame akisi bozulursa yeniden acma denemesi
+- `logs/` altinda JSONL telemetry
+- `recordings/` altinda opsiyonel video kaydi
+- GitHub Actions CI ve temel runtime testleri
+
+## Su an en uygun calisma ortami
+
+Bu kod tabani bugunku haliyle en verimli ve en sorunsuz sekilde su senaryoda calisir:
+
+- Windows 10/11
+- x64 masaustu veya laptop sistem
+- Visual Studio toolchain + OpenCV kurulumu tamamlanmis gelistirme ortami
+- Python 3.12 hazir ve `onnxruntime`, `opencv-python`, `numpy` kurulu
+- USB veya dahili kamera ile yerel test
+
+Bunun temel nedeni, projenin mevcut mimarisinin dogrudan Windows odakli olmasidir:
+
+- `main.cpp` tarafinda `windows.h`, `HANDLE` ve `CreateProcessW` kullaniliyor
+- derleme ve calistirma akisi `.bat` script'leri ile kurulmus
+- inference tarafi `scripts/ort_worker.py` icinde `CPUExecutionProvider` ile calisiyor
+
+Yani bugunku yapi:
+
+- prototipleme icin iyi
+- masaustunde hizli gelistirme icin uygun
+- algoritma dogrulamasi icin mantikli
+- ama gomulu hedefe son haliyle tasinmis bir yapi degil
+
+Performans olarak en iyi sonuc genelde su kosullarda beklenir:
+
+- iyi aydinlatilmis ortam
+- kamerada asiri titresim olmamasi
+- hedefin goruntu icinde cok kucuk kalmamasi
+- sahnede ayni anda cok fazla nesne olmamasi
+- orta veya ust seviye bir CPU kullanilmasi
+
+Sebebi su: mevcut pipeline'da frame once JPEG olarak encode ediliyor, sonra Python worker icinde decode edilip 640x640 girise yeniden olceklendiriliyor. Bu da sistemi GPU'dan cok CPU, bellek kopyalari ve islem gecikmesine duyarli hale getiriyor.
 
 ## Python bagimliliklari
 
@@ -157,6 +215,15 @@ Alternatif olarak exe'yi dogrudan da calistirabilirsin:
 .\hss_sistem.exe
 ```
 
+Yaygin komut ornekleri:
+
+```powershell
+.\hss_sistem.exe --headless
+.\hss_sistem.exe --camera 1 --record
+.\hss_sistem.exe --config config\runtime_config.json --log-dir logs
+.\hss_sistem.exe --package deliverables\onnxruntime_cpu_package --python C:\tam\yol\python.exe
+```
+
 Varsayilan paket yolu:
 
 ```text
@@ -170,6 +237,20 @@ Farkli bir paket klasoru ile calistirmak icin:
 ```
 
 Uygulamadan cikmak icin pencere aktifken `ESC` tusuna bas.
+
+## Konfigurasyon
+
+Temel runtime ayarlari [config/runtime_config.json](/C:/Users/askan/Desktop/KORGAN/config/runtime_config.json:1) icindedir.
+
+Buradan su tip ayarlari yonetebilirsin:
+
+- izlenecek ve referans siniflar
+- detector ve tracker threshold'lari
+- IoU esitleri ve track yasami
+- kamera index'i
+- log ve recording klasorleri
+- worker yeniden baslatma siniri
+- pencere gosterimi ve recording acik/kapali durumu
 
 ## Model paketi mantigi
 
@@ -186,6 +267,24 @@ Not:
 - `.gitignore` dosyasi geregi `*.onnx`, `*.pt` ve bazi buyuk cikti dosyalari Git tarafinda ignore edilir.
 - Repo'yu baska bir makinede klonlarsan model dosyalarini manuel olarak tekrar koyman gerekebilir.
 - Bunun icin `deliverables/onnxruntime_cpu_package/` klasoru uygulamanin bekledigi temel yerdir.
+
+## Jetson tarafi icin teknik not
+
+Jetson hedeflendiginde en dogru yol mevcut Windows + Python worker + ONNX Runtime CPU yapisini aynen tasimak degil, Jetson kosullarina uygun daha dogrudan bir inference hattina gecmektir.
+
+Bugunku kod, Jetson icin degil once masaustu dogrulamasi icin daha uygundur. Jetson tarafinda daha iyi sonuc beklenen yapi genellikle sunlara yakindir:
+
+- Linux uyumlu process ve kamera entegrasyonu
+- gereksiz encode/decode ve processler arasi veri kopyalarinin azaltilmasi
+- GPU hizlandirmali inference
+- TensorRT tabanli calisma
+
+Bu yuzden ileriki donem icin en mantikli teknik yon su olur:
+
+- gelistirme ve test: Windows + ONNX Runtime CPU
+- saha/cihaz odakli optimizasyon: Jetson uzerinde TensorRT
+
+Kisacasi bu repodaki mevcut ORT CPU mimarisi son hedef mimari olarak degil, algoritmayi gelistirmek, takip mantigini oturtmak ve paket formatini dogrulamak icin kullanilan ara mimari olarak dusunulmelidir.
 
 ## Ekranda ne goruyorsun
 
@@ -209,34 +308,38 @@ Terminal satirinda gorulen alanlar genel olarak sunlari ifade eder:
 
 ## Telemetri log dosyasi
 
-Loglar su dosyaya append edilir:
+Loglar `logs/` altinda zaman damgali `.jsonl` dosyalarina yazilir.
 
-```text
-telemetri_log.txt
-```
-
-Bu dosyada ozellikle su bilgiler yer alir:
+Bu loglarda ozellikle su bilgiler yer alir:
 
 - zaman damgasi
+- frame index
+- takip durumu
 - hedef koordinatlari
 - yaklasik mesafe
 - sinif ve etiket
 - confidence
 - track ID
-- worker ve inference gecikmeleri
+- worker restart sayisi
+- worker, tracker ve frame gecikmeleri
+- kayit aktifse video dosyasi bilgisi
 
 ## Degistirilebilecek temel ayarlar
 
-Asagidaki sabitler [main.cpp](/C:/Users/askan/Desktop/KORGAN/main.cpp:16) icinde kolayca degistirilebilir:
+Asagidaki ayarlar artik agirlikli olarak [config/runtime_config.json](/C:/Users/askan/Desktop/KORGAN/config/runtime_config.json:1) icinden degistirilir:
 
-- `IZLENECEK_SINIFLAR`
-- `REFERANS_SINIFLAR`
-- `HEDEF_GERCEK_GENISLIK_CM`
-- `KAMERA_ODAK_UZAKLIGI`
-- `CONFIDENCE_THRESHOLD`
-- `NMS_THRESHOLD`
-- `TRACK_MATCH_DISTANCE_PX`
-- `TRACK_MAX_MISSED_FRAMES`
+- `izlenecek_siniflar`
+- `referans_siniflar`
+- `distance.hedef_gercek_genislik_cm`
+- `distance.kamera_odak_uzakligi`
+- `detection.detector_conf_threshold`
+- `detection.tracker_high_conf_threshold`
+- `detection.tracker_low_conf_threshold`
+- `detection.nms_threshold`
+- `tracking.track_match_iou_threshold`
+- `tracking.track_max_missed_frames`
+- `runtime.camera_index`
+- `runtime.enable_recording`
 
 Bu ayarlar sirasiyla:
 
@@ -244,7 +347,8 @@ Bu ayarlar sirasiyla:
 - hangi siniflarin referans sayilacagini
 - yaklasik mesafe hesabini
 - tespit filtrelemesini
-- tracking toleransini
+- tracking davranisini
+- runtime davranisini
 
 etkiler.
 
@@ -284,6 +388,7 @@ Muhtemel nedenler:
 - kamera baska uygulama tarafindan kullaniliyor
 - cihazda kamera yok
 - Windows kamera izinleri kapali
+- secilen `camera_index` yanlis
 
 ### 4. OpenCV DLL hatasi
 
@@ -295,6 +400,20 @@ Cozum:
 
 - `scripts\run_opencv.bat` ile calistir
 - OpenCV kurulum yolunun script ile uyustugunu kontrol et
+
+### 5. Worker yeniden baslatiliyor ama duzelmiyor
+
+Muhtemel nedenler:
+
+- Python bagimliliklari eksik
+- model paketi bozuk veya eksik
+- worker threshold/config parametreleri yanlis
+
+Cozum:
+
+- `pip install opencv-python numpy onnxruntime`
+- `config/runtime_config.json` icindeki `package_dir` ve threshold alanlarini kontrol et
+- log dosyasindaki `worker_error` ve `worker_restarted` event'lerine bak
 
 ## GitHub uzerinde ekipce nasil calisacagiz
 
@@ -329,7 +448,10 @@ Hangi konuya gore hangi dosyaya bakilacagi:
 - model yukleme ve inference: `scripts/ort_worker.py`
 - derleme sorunu: `scripts/build_opencv.bat`
 - calistirma ortami/PATH sorunu: `scripts/run_opencv.bat`
+- runtime ayarlari: `config/runtime_config.json`
 - model paket yapisi: `deliverables/onnxruntime_cpu_package/`
+- temel dogrulama testleri: `tests/test_runtime_files.py`
+- CI davranisi: `.github/workflows/ci.yml`
 - git akisi: `GIT_WORKFLOW.md`
 
 ## Son not

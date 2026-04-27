@@ -6,35 +6,22 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cv;
 using namespace std;
 namespace fs = std::filesystem;
-
-// === TAKIP SINIFLARI ===
-vector<int> IZLENECEK_SINIFLAR = {0, 32, 67};  // 0=Insan, 32=Sports ball, 67=Cell phone
-vector<int> REFERANS_SINIFLAR = {39};          // 39=Bottle
-
-// === YAKLASIK Z EKSENI MESAFE AYARLARI ===
-const float HEDEF_GERCEK_GENISLIK_CM = 25.0f;
-const float KAMERA_ODAK_UZAKLIGI = 600.0f;
-const double CONFIDENCE_THRESHOLD = 0.45;
-const double NMS_THRESHOLD = 0.45;
-const float TRACK_MATCH_DISTANCE_PX = 140.0f;
-const int TRACK_MAX_MISSED_FRAMES = 12;
-const int PRIMARY_LOCK_MAX_LOST_FRAMES = 8;
-const float PRIMARY_LOCK_TRACK_BONUS = 0.35f;
-const float PRIMARY_LOCK_CENTER_WEIGHT = 0.25f;
-const float PRIMARY_LOCK_AREA_WEIGHT = 0.15f;
 
 struct PrimaryLockState {
     int active_track_id = -1;
@@ -53,6 +40,8 @@ struct Detection {
     Rect box;
     int track_id = -1;
     bool kalman_kullanildi = false;
+    bool predicted_only = false;
+    bool low_confidence_match = false;
 };
 
 struct TimingMetrics {
@@ -76,26 +65,88 @@ struct PackageInfo {
     int class_count = 0;
 };
 
+struct RuntimeConfig {
+    vector<int> izlenecek_siniflar = {0, 32, 67};
+    vector<int> referans_siniflar = {39};
+
+    float hedef_gercek_genislik_cm = 25.0f;
+    float kamera_odak_uzakligi = 600.0f;
+
+    double detector_conf_threshold = 0.15;
+    double tracker_high_conf_threshold = 0.45;
+    double tracker_low_conf_threshold = 0.15;
+    double nms_threshold = 0.45;
+
+    float track_match_iou_threshold = 0.30f;
+    float low_conf_match_iou_threshold = 0.20f;
+    int track_max_missed_frames = 12;
+    int track_visible_missed_frames = 4;
+    int track_confirm_hits = 2;
+
+    int primary_lock_max_lost_frames = 8;
+    float primary_lock_track_bonus = 0.35f;
+    float primary_lock_center_weight = 0.25f;
+    float primary_lock_area_weight = 0.15f;
+
+    int camera_index = 0;
+    bool show_window = true;
+    bool enable_recording = false;
+    fs::path record_dir = "recordings";
+    fs::path log_dir = "logs";
+
+    fs::path package_dir = "deliverables/onnxruntime_cpu_package";
+    fs::path worker_script = "scripts/ort_worker.py";
+    fs::path python_path;
+    int worker_jpeg_quality = 90;
+    bool worker_auto_restart = true;
+    int worker_max_restarts = 3;
+
+    int camera_reopen_attempts = 4;
+    int camera_reopen_delay_ms = 750;
+    bool log_every_frame = true;
+};
+
+struct AppOptions {
+    fs::path config_path = "config/runtime_config.json";
+    fs::path package_override;
+    fs::path python_override;
+    fs::path log_dir_override;
+    fs::path record_dir_override;
+    int camera_override = -1;
+    bool headless = false;
+    bool force_show = false;
+    bool record_override_set = false;
+    bool record_override_value = false;
+};
+
+struct WorkerLaunchOptions {
+    fs::path package_dir;
+    fs::path worker_script;
+    fs::path python_path;
+    double detector_conf_threshold = 0.15;
+    double nms_threshold = 0.45;
+    int jpeg_quality = 90;
+};
+
 struct Track {
     int id = -1;
     int class_id = -1;
+    int hits = 0;
     int missed_frames = 0;
+    bool confirmed = false;
     float last_confidence = 0.0f;
     Rect estimated_box;
     KalmanFilter filter;
 };
 
+struct MatchCandidate {
+    size_t track_index = 0;
+    size_t detection_index = 0;
+    float score = 0.0f;
+};
+
 bool listedeVarMi(const vector<int>& liste, int id) {
     return find(liste.begin(), liste.end(), id) != liste.end();
-}
-
-int hedefOncelikPuani(int class_id) {
-    for (size_t i = 0; i < IZLENECEK_SINIFLAR.size(); ++i) {
-        if (IZLENECEK_SINIFLAR[i] == class_id) {
-            return static_cast<int>(IZLENECEK_SINIFLAR.size() - i);
-        }
-    }
-    return 0;
 }
 
 string trim(const string& value) {
@@ -107,6 +158,73 @@ string trim(const string& value) {
 
     const size_t last = value.find_last_not_of(whitespace);
     return value.substr(first, last - first + 1);
+}
+
+bool basliyorMu(const string& value, const string& prefix) {
+    return value.rfind(prefix, 0) == 0;
+}
+
+string jsonKacis(const string& value) {
+    ostringstream out;
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '\\':
+                out << "\\\\";
+                break;
+            case '"':
+                out << "\\\"";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
+            default:
+                if (ch < 0x20) {
+                    out << "\\u" << hex << setw(4) << setfill('0') << static_cast<int>(ch) << dec;
+                } else {
+                    out << ch;
+                }
+                break;
+        }
+    }
+    return out.str();
+}
+
+string jsonBool(bool value) {
+    return value ? "true" : "false";
+}
+
+string zamanDamgasiOlustur() {
+    auto now = chrono::system_clock::now();
+    const auto millis = chrono::duration_cast<chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    time_t now_time = chrono::system_clock::to_time_t(now);
+    tm local_tm{};
+    localtime_s(&local_tm, &now_time);
+
+    ostringstream output;
+    output << put_time(&local_tm, "%Y-%m-%d %H:%M:%S") << '.' << setw(3) << setfill('0') << millis.count();
+    return output.str();
+}
+
+string dosyaAdiIcinZamanDamgasi() {
+    time_t now_time = chrono::system_clock::to_time_t(chrono::system_clock::now());
+    tm local_tm{};
+    localtime_s(&local_tm, &now_time);
+
+    ostringstream output;
+    output << put_time(&local_tm, "%Y%m%d_%H%M%S");
+    return output.str();
 }
 
 string satirOku(HANDLE handle) {
@@ -150,18 +268,6 @@ void tumunuYaz(HANDLE handle, const void* data, size_t size) {
     }
 }
 
-string zamanDamgasiOlustur() {
-    auto now = chrono::system_clock::now();
-    const auto millis = chrono::duration_cast<chrono::milliseconds>(now.time_since_epoch()) % 1000;
-    time_t now_time = chrono::system_clock::to_time_t(now);
-    tm local_tm{};
-    localtime_s(&local_tm, &now_time);
-
-    ostringstream output;
-    output << put_time(&local_tm, "%Y-%m-%d %H:%M:%S") << '.' << setw(3) << setfill('0') << millis.count();
-    return output.str();
-}
-
 Point2f kutuMerkezi(const Rect& box) {
     return Point2f(box.x + box.width * 0.5f, box.y + box.height * 0.5f);
 }
@@ -185,50 +291,19 @@ Rect stateTenKutuOlustur(const Mat& state, const Size& frame_size) {
     return kutuyuKirp(Rect(Point(left, top), Point(right, bottom)), frame_size);
 }
 
-float hedefSkoru(const Detection& detection, const Size& frame_size, int active_track_id) {
-    const Point2f center = kutuMerkezi(detection.box);
-    const Point2f frame_center(frame_size.width * 0.5f, frame_size.height * 0.5f);
-    const float max_distance = std::sqrt(frame_center.x * frame_center.x + frame_center.y * frame_center.y);
-    const float center_distance = static_cast<float>(norm(center - frame_center));
-    const float center_score = 1.0f - std::min(center_distance / std::max(max_distance, 1.0f), 1.0f);
-    const float area_score = std::min(
-        static_cast<float>(detection.box.area()) / std::max(frame_size.area() * 0.2f, 1.0f),
-        1.0f);
-    const float continuity_bonus = (detection.track_id == active_track_id) ? PRIMARY_LOCK_TRACK_BONUS : 0.0f;
-    const float class_bonus = 0.05f * hedefOncelikPuani(detection.class_id);
-
-    return detection.confidence + center_score * PRIMARY_LOCK_CENTER_WEIGHT + area_score * PRIMARY_LOCK_AREA_WEIGHT +
-           continuity_bonus + class_bonus;
-}
-
-string takipDurumuMetni(TakipDurumu durum) {
-    switch (durum) {
-        case TakipDurumu::Izleniyor:
-            return "IZLENIYOR";
-        case TakipDurumu::Belirsiz:
-            return "BELIRSIZ";
-        default:
-            return "BEKLENIYOR";
-    }
-}
-
-int birincilHedefiSec(const vector<Detection>& detections, const Size& frame_size, const PrimaryLockState& lock_state) {
-    float best_score = -1.0f;
-    int best_index = -1;
-
-    for (size_t i = 0; i < detections.size(); ++i) {
-        if (!listedeVarMi(IZLENECEK_SINIFLAR, detections[i].class_id)) {
-            continue;
-        }
-
-        const float score = hedefSkoru(detections[i], frame_size, lock_state.active_track_id);
-        if (score > best_score) {
-            best_score = score;
-            best_index = static_cast<int>(i);
-        }
+float kutuIou(const Rect& a, const Rect& b) {
+    const Rect intersection = a & b;
+    if (intersection.width <= 0 || intersection.height <= 0) {
+        return 0.0f;
     }
 
-    return best_index;
+    const float inter_area = static_cast<float>(intersection.area());
+    const float union_area = static_cast<float>(a.area() + b.area()) - inter_area;
+    if (union_area <= 0.0f) {
+        return 0.0f;
+    }
+
+    return inter_area / union_area;
 }
 
 KalmanFilter kalmanFiltresiOlustur(const Rect& initial_box) {
@@ -256,91 +331,272 @@ KalmanFilter kalmanFiltresiOlustur(const Rect& initial_box) {
     filter.statePost.at<float>(1) = initial_box.y + initial_box.height * 0.5f;
     filter.statePost.at<float>(2) = static_cast<float>(std::max(initial_box.width, 1));
     filter.statePost.at<float>(3) = static_cast<float>(std::max(initial_box.height, 1));
-
     filter.statePre = filter.statePost.clone();
     return filter;
 }
 
-class DetectionTracker {
-public:
-    vector<Detection> guncelle(const vector<Detection>& detections, const Size& frame_size) {
-        vector<Detection> filtered = detections;
-        vector<Rect> predicted_boxes(tracks_.size());
+int hedefOncelikPuani(const RuntimeConfig& config, int class_id) {
+    for (size_t i = 0; i < config.izlenecek_siniflar.size(); ++i) {
+        if (config.izlenecek_siniflar[i] == class_id) {
+            return static_cast<int>(config.izlenecek_siniflar.size() - i);
+        }
+    }
+    return 0;
+}
 
-        for (size_t i = 0; i < tracks_.size(); ++i) {
-            Mat prediction = tracks_[i].filter.predict();
-            tracks_[i].estimated_box = stateTenKutuOlustur(prediction, frame_size);
-            predicted_boxes[i] = tracks_[i].estimated_box;
-            tracks_[i].missed_frames++;
+float hedefSkoru(const RuntimeConfig& config,
+                 const Detection& detection,
+                 const Size& frame_size,
+                 int active_track_id) {
+    const Point2f center = kutuMerkezi(detection.box);
+    const Point2f frame_center(frame_size.width * 0.5f, frame_size.height * 0.5f);
+    const float max_distance = std::sqrt(frame_center.x * frame_center.x + frame_center.y * frame_center.y);
+    const float center_distance = static_cast<float>(norm(center - frame_center));
+    const float center_score = 1.0f - std::min(center_distance / std::max(max_distance, 1.0f), 1.0f);
+    const float area_score =
+        std::min(static_cast<float>(detection.box.area()) /
+                     std::max(static_cast<float>(frame_size.area()) * 0.2f, 1.0f),
+                 1.0f);
+    const float continuity_bonus = (detection.track_id == active_track_id) ? config.primary_lock_track_bonus : 0.0f;
+    const float class_bonus = 0.05f * hedefOncelikPuani(config, detection.class_id);
+    const float predicted_penalty = detection.predicted_only ? 0.35f : 0.0f;
+
+    return detection.confidence + center_score * config.primary_lock_center_weight +
+           area_score * config.primary_lock_area_weight + continuity_bonus + class_bonus - predicted_penalty;
+}
+
+string takipDurumuMetni(TakipDurumu durum) {
+    switch (durum) {
+        case TakipDurumu::Izleniyor:
+            return "IZLENIYOR";
+        case TakipDurumu::Belirsiz:
+            return "BELIRSIZ";
+        default:
+            return "BEKLENIYOR";
+    }
+}
+
+int birincilHedefiSec(const RuntimeConfig& config,
+                      const vector<Detection>& detections,
+                      const Size& frame_size,
+                      const PrimaryLockState& lock_state) {
+    float best_score = -numeric_limits<float>::max();
+    int best_index = -1;
+
+    for (size_t i = 0; i < detections.size(); ++i) {
+        if (detections[i].predicted_only || !listedeVarMi(config.izlenecek_siniflar, detections[i].class_id)) {
+            continue;
         }
 
-        vector<bool> track_used(tracks_.size(), false);
-
-        for (Detection& detection : filtered) {
-            const Point2f detection_center = kutuMerkezi(detection.box);
-            float best_distance = std::numeric_limits<float>::max();
-            int best_track_index = -1;
-
-            for (size_t i = 0; i < tracks_.size(); ++i) {
-                if (track_used[i] || tracks_[i].class_id != detection.class_id) {
-                    continue;
-                }
-
-                const Point2f predicted_center = kutuMerkezi(predicted_boxes[i]);
-                const float distance = static_cast<float>(norm(detection_center - predicted_center));
-                if (distance < best_distance && distance <= TRACK_MATCH_DISTANCE_PX) {
-                    best_distance = distance;
-                    best_track_index = static_cast<int>(i);
-                }
-            }
-
-            if (best_track_index >= 0) {
-                Track& track = tracks_[best_track_index];
-                Mat measurement(4, 1, CV_32F);
-                measurement.at<float>(0) = detection_center.x;
-                measurement.at<float>(1) = detection_center.y;
-                measurement.at<float>(2) = static_cast<float>(std::max(detection.box.width, 1));
-                measurement.at<float>(3) = static_cast<float>(std::max(detection.box.height, 1));
-
-                Mat estimated = track.filter.correct(measurement);
-                track.estimated_box = stateTenKutuOlustur(estimated, frame_size);
-                track.last_confidence = detection.confidence;
-                track.missed_frames = 0;
-
-                detection.box = track.estimated_box;
-                detection.track_id = track.id;
-                detection.kalman_kullanildi = true;
-                track_used[best_track_index] = true;
-            } else {
-                Track new_track;
-                new_track.id = next_track_id_++;
-                new_track.class_id = detection.class_id;
-                new_track.last_confidence = detection.confidence;
-                new_track.filter = kalmanFiltresiOlustur(detection.box);
-                new_track.estimated_box = kutuyuKirp(detection.box, frame_size);
-                tracks_.push_back(new_track);
-                track_used.push_back(true);
-                predicted_boxes.push_back(new_track.estimated_box);
-
-                detection.box = new_track.estimated_box;
-                detection.track_id = new_track.id;
-                detection.kalman_kullanildi = true;
-            }
+        const float score = hedefSkoru(config, detections[i], frame_size, lock_state.active_track_id);
+        if (score > best_score) {
+            best_score = score;
+            best_index = static_cast<int>(i);
         }
-
-        tracks_.erase(
-            remove_if(tracks_.begin(),
-                      tracks_.end(),
-                      [](const Track& track) { return track.missed_frames > TRACK_MAX_MISSED_FRAMES; }),
-            tracks_.end());
-
-        return filtered;
     }
 
-private:
-    int next_track_id_ = 1;
-    vector<Track> tracks_;
-};
+    return best_index;
+}
+
+template <typename T>
+void alanOku(const FileNode& node, const string& key, T& value) {
+    const FileNode child = node[key];
+    if (!child.empty()) {
+        child >> value;
+    }
+}
+
+void boolAlanOku(const FileNode& node, const string& key, bool& value) {
+    const FileNode child = node[key];
+    if (child.empty()) {
+        return;
+    }
+
+    int numeric = value ? 1 : 0;
+    child >> numeric;
+    value = numeric != 0;
+}
+
+void pathAlanOku(const FileNode& node, const string& key, fs::path& value) {
+    const FileNode child = node[key];
+    if (child.empty()) {
+        return;
+    }
+
+    string temp;
+    child >> temp;
+    if (!temp.empty()) {
+        value = fs::path(temp);
+    }
+}
+
+RuntimeConfig configYukle(const fs::path& config_path) {
+    RuntimeConfig config;
+    if (!fs::exists(config_path)) {
+        return config;
+    }
+
+    FileStorage fs_config(config_path.string(), FileStorage::READ | FileStorage::FORMAT_JSON);
+    if (!fs_config.isOpened()) {
+        throw runtime_error("Config dosyasi acilamadi: " + config_path.string());
+    }
+
+    alanOku(fs_config.root(), "izlenecek_siniflar", config.izlenecek_siniflar);
+    alanOku(fs_config.root(), "referans_siniflar", config.referans_siniflar);
+
+    FileNode distance = fs_config["distance"];
+    if (!distance.empty()) {
+        alanOku(distance, "hedef_gercek_genislik_cm", config.hedef_gercek_genislik_cm);
+        alanOku(distance, "kamera_odak_uzakligi", config.kamera_odak_uzakligi);
+    }
+
+    FileNode detection = fs_config["detection"];
+    if (!detection.empty()) {
+        alanOku(detection, "detector_conf_threshold", config.detector_conf_threshold);
+        alanOku(detection, "tracker_high_conf_threshold", config.tracker_high_conf_threshold);
+        alanOku(detection, "tracker_low_conf_threshold", config.tracker_low_conf_threshold);
+        alanOku(detection, "nms_threshold", config.nms_threshold);
+    }
+
+    FileNode tracking = fs_config["tracking"];
+    if (!tracking.empty()) {
+        alanOku(tracking, "track_match_iou_threshold", config.track_match_iou_threshold);
+        alanOku(tracking, "low_conf_match_iou_threshold", config.low_conf_match_iou_threshold);
+        alanOku(tracking, "track_max_missed_frames", config.track_max_missed_frames);
+        alanOku(tracking, "track_visible_missed_frames", config.track_visible_missed_frames);
+        alanOku(tracking, "track_confirm_hits", config.track_confirm_hits);
+        alanOku(tracking, "primary_lock_max_lost_frames", config.primary_lock_max_lost_frames);
+        alanOku(tracking, "primary_lock_track_bonus", config.primary_lock_track_bonus);
+        alanOku(tracking, "primary_lock_center_weight", config.primary_lock_center_weight);
+        alanOku(tracking, "primary_lock_area_weight", config.primary_lock_area_weight);
+    }
+
+    FileNode runtime = fs_config["runtime"];
+    if (!runtime.empty()) {
+        alanOku(runtime, "camera_index", config.camera_index);
+        pathAlanOku(runtime, "record_dir", config.record_dir);
+        pathAlanOku(runtime, "log_dir", config.log_dir);
+        pathAlanOku(runtime, "package_dir", config.package_dir);
+        pathAlanOku(runtime, "worker_script", config.worker_script);
+        pathAlanOku(runtime, "python_path", config.python_path);
+        alanOku(runtime, "worker_jpeg_quality", config.worker_jpeg_quality);
+        alanOku(runtime, "worker_max_restarts", config.worker_max_restarts);
+        alanOku(runtime, "camera_reopen_attempts", config.camera_reopen_attempts);
+        alanOku(runtime, "camera_reopen_delay_ms", config.camera_reopen_delay_ms);
+        boolAlanOku(runtime, "show_window", config.show_window);
+        boolAlanOku(runtime, "enable_recording", config.enable_recording);
+        boolAlanOku(runtime, "worker_auto_restart", config.worker_auto_restart);
+        boolAlanOku(runtime, "log_every_frame", config.log_every_frame);
+    }
+
+    return config;
+}
+
+void configDogrula(const RuntimeConfig& config) {
+    if (config.izlenecek_siniflar.empty()) {
+        throw runtime_error("Config hatasi: izlenecek_siniflar bos olamaz.");
+    }
+    if (config.hedef_gercek_genislik_cm <= 0.0f || config.kamera_odak_uzakligi <= 0.0f) {
+        throw runtime_error("Config hatasi: mesafe hesap parametreleri sifirdan buyuk olmalidir.");
+    }
+    if (config.detector_conf_threshold < 0.0 || config.detector_conf_threshold > 1.0 ||
+        config.tracker_high_conf_threshold < 0.0 || config.tracker_high_conf_threshold > 1.0 ||
+        config.tracker_low_conf_threshold < 0.0 || config.tracker_low_conf_threshold > 1.0 ||
+        config.nms_threshold < 0.0 || config.nms_threshold > 1.0) {
+        throw runtime_error("Config hatasi: threshold degerleri 0.0 ile 1.0 arasinda olmalidir.");
+    }
+    if (config.detector_conf_threshold > config.tracker_low_conf_threshold ||
+        config.tracker_low_conf_threshold > config.tracker_high_conf_threshold) {
+        throw runtime_error("Config hatasi: detector_conf <= tracker_low_conf <= tracker_high_conf olmalidir.");
+    }
+    if (config.track_match_iou_threshold <= 0.0f || config.low_conf_match_iou_threshold <= 0.0f) {
+        throw runtime_error("Config hatasi: IoU esikleri sifirdan buyuk olmalidir.");
+    }
+    if (config.track_confirm_hits < 1 || config.track_max_missed_frames < 1 || config.track_visible_missed_frames < 0) {
+        throw runtime_error("Config hatasi: tracking frame ayarlari gecersiz.");
+    }
+    if (config.worker_jpeg_quality < 50 || config.worker_jpeg_quality > 100) {
+        throw runtime_error("Config hatasi: worker_jpeg_quality 50 ile 100 arasinda olmalidir.");
+    }
+}
+
+void applyOverrides(const AppOptions& options, RuntimeConfig& config) {
+    if (!options.package_override.empty()) {
+        config.package_dir = options.package_override;
+    }
+    if (!options.python_override.empty()) {
+        config.python_path = options.python_override;
+    }
+    if (!options.log_dir_override.empty()) {
+        config.log_dir = options.log_dir_override;
+    }
+    if (!options.record_dir_override.empty()) {
+        config.record_dir = options.record_dir_override;
+    }
+    if (options.camera_override >= 0) {
+        config.camera_index = options.camera_override;
+    }
+    if (options.headless) {
+        config.show_window = false;
+    }
+    if (options.force_show) {
+        config.show_window = true;
+    }
+    if (options.record_override_set) {
+        config.enable_recording = options.record_override_value;
+    }
+}
+
+AppOptions argumanlariAyristir(int argc, char** argv) {
+    AppOptions options;
+
+    for (int i = 1; i < argc; ++i) {
+        const string arg = argv[i];
+        const auto require_value = [&](const string& name) -> string {
+            if (i + 1 >= argc) {
+                throw runtime_error("Eksik arguman degeri: " + name);
+            }
+            ++i;
+            return argv[i];
+        };
+
+        if (arg == "--help" || arg == "-h") {
+            cout << "Kullanim:\n"
+                 << "  hss_sistem.exe [--config path] [--package dir] [--camera index]\n"
+                 << "                 [--python path] [--headless|--show]\n"
+                 << "                 [--record|--no-record] [--record-dir dir] [--log-dir dir]\n";
+            std::exit(0);
+        } else if (arg == "--config") {
+            options.config_path = require_value(arg);
+        } else if (arg == "--package") {
+            options.package_override = require_value(arg);
+        } else if (arg == "--camera") {
+            options.camera_override = stoi(require_value(arg));
+        } else if (arg == "--python") {
+            options.python_override = require_value(arg);
+        } else if (arg == "--log-dir") {
+            options.log_dir_override = require_value(arg);
+        } else if (arg == "--record-dir") {
+            options.record_dir_override = require_value(arg);
+        } else if (arg == "--headless") {
+            options.headless = true;
+        } else if (arg == "--show") {
+            options.force_show = true;
+        } else if (arg == "--record") {
+            options.record_override_set = true;
+            options.record_override_value = true;
+        } else if (arg == "--no-record") {
+            options.record_override_set = true;
+            options.record_override_value = false;
+        } else if (!basliyorMu(arg, "--") && options.package_override.empty()) {
+            options.package_override = arg;
+        } else {
+            throw runtime_error("Bilinmeyen arguman: " + arg);
+        }
+    }
+
+    return options;
+}
 
 vector<string> etiketleriYukle(const fs::path& labels_path) {
     ifstream input(labels_path);
@@ -397,33 +653,303 @@ PackageInfo paketiYukle(const fs::path& package_dir) {
     return info;
 }
 
-wstring pythonYoluBul() {
+wstring pythonYoluBul(const fs::path& configured_python) {
+    vector<fs::path> candidates;
+
+    if (!configured_python.empty()) {
+        candidates.push_back(configured_python);
+    }
+
     char env_buffer[1024] = {};
     const DWORD env_length = GetEnvironmentVariableA("KORGAN_PYTHON", env_buffer, static_cast<DWORD>(sizeof(env_buffer)));
     if (env_length > 0 && env_length < sizeof(env_buffer)) {
-        fs::path env_python(env_buffer);
-        if (fs::exists(env_python)) {
-            return env_python.wstring();
-        }
+        candidates.emplace_back(env_buffer);
     }
 
-    const vector<fs::path> candidates = {
-        fs::path("C:/Users/askan/AppData/Local/Programs/Python/Python312/python.exe"),
-        fs::path("python.exe")
-    };
+    candidates.emplace_back("C:/Users/askan/AppData/Local/Programs/Python/Python312/python.exe");
+    candidates.emplace_back("python.exe");
 
     for (const auto& candidate : candidates) {
+        if (candidate.empty()) {
+            continue;
+        }
         if (candidate.filename() == "python.exe" || fs::exists(candidate)) {
             return candidate.wstring();
         }
     }
 
-    throw runtime_error("Python bulunamadi. KORGAN_PYTHON ortam degiskenini ayarlayin.");
+    throw runtime_error("Python bulunamadi. KORGAN_PYTHON veya --python ile tam yolu verin.");
 }
+
+class JsonlLogger {
+public:
+    explicit JsonlLogger(const fs::path& log_dir) {
+        fs::create_directories(log_dir);
+        path_ = fs::absolute(log_dir / ("telemetry_" + dosyaAdiIcinZamanDamgasi() + ".jsonl"));
+        output_.open(path_, ios::out | ios::app);
+        if (!output_.is_open()) {
+            throw runtime_error("Log dosyasi acilamadi: " + path_.string());
+        }
+    }
+
+    const fs::path& path() const {
+        return path_;
+    }
+
+    void yaz(const string& line) {
+        output_ << line << '\n';
+        output_.flush();
+    }
+
+private:
+    fs::path path_;
+    ofstream output_;
+};
+
+class FrameRecorder {
+public:
+    void baslat(const fs::path& record_dir, const Size& frame_size, double fps) {
+        if (writer_.isOpened()) {
+            return;
+        }
+
+        fs::create_directories(record_dir);
+        output_path_ = fs::absolute(record_dir / ("session_" + dosyaAdiIcinZamanDamgasi() + ".mp4"));
+
+        const double normalized_fps = (fps > 1.0 && fps < 240.0) ? fps : 30.0;
+        writer_.open(output_path_.string(), VideoWriter::fourcc('m', 'p', '4', 'v'), normalized_fps, frame_size, true);
+
+        if (!writer_.isOpened()) {
+            output_path_ = fs::absolute(record_dir / ("session_" + dosyaAdiIcinZamanDamgasi() + ".avi"));
+            writer_.open(output_path_.string(), VideoWriter::fourcc('M', 'J', 'P', 'G'), normalized_fps, frame_size, true);
+        }
+
+        if (!writer_.isOpened()) {
+            throw runtime_error("Kayit dosyasi acilamadi.");
+        }
+    }
+
+    bool aktif() const {
+        return writer_.isOpened();
+    }
+
+    const fs::path& yol() const {
+        return output_path_;
+    }
+
+    void kareYaz(const Mat& frame) {
+        if (writer_.isOpened()) {
+            writer_.write(frame);
+        }
+    }
+
+private:
+    VideoWriter writer_;
+    fs::path output_path_;
+};
+
+class DetectionTracker {
+public:
+    explicit DetectionTracker(const RuntimeConfig& config) : config_(config) {}
+
+    vector<Detection> guncelle(const vector<Detection>& raw_detections, const Size& frame_size) {
+        vector<Detection> detections = raw_detections;
+        vector<Rect> predicted_boxes(tracks_.size());
+        vector<size_t> active_track_indices;
+
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            Mat prediction = tracks_[i].filter.predict();
+            tracks_[i].estimated_box = stateTenKutuOlustur(prediction, frame_size);
+            predicted_boxes[i] = tracks_[i].estimated_box;
+            tracks_[i].missed_frames++;
+            active_track_indices.push_back(i);
+        }
+
+        vector<size_t> high_indices;
+        vector<size_t> low_indices;
+        for (size_t i = 0; i < detections.size(); ++i) {
+            detections[i].box = kutuyuKirp(detections[i].box, frame_size);
+            if (detections[i].box.width <= 0 || detections[i].box.height <= 0) {
+                continue;
+            }
+
+            if (detections[i].confidence >= config_.tracker_high_conf_threshold) {
+                high_indices.push_back(i);
+            } else if (detections[i].confidence >= config_.tracker_low_conf_threshold) {
+                low_indices.push_back(i);
+            }
+        }
+
+        vector<bool> detection_used(detections.size(), false);
+        vector<bool> track_used(tracks_.size(), false);
+        vector<Detection> output;
+        output.reserve(detections.size() + tracks_.size());
+
+        eslestir(high_indices,
+                 config_.track_match_iou_threshold,
+                 false,
+                 detections,
+                 predicted_boxes,
+                 detection_used,
+                 track_used,
+                 output,
+                 frame_size);
+
+        vector<size_t> unmatched_confirmed_tracks;
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            if (!track_used[i] && tracks_[i].confirmed) {
+                unmatched_confirmed_tracks.push_back(i);
+            }
+        }
+
+        eslestir(low_indices,
+                 config_.low_conf_match_iou_threshold,
+                 true,
+                 detections,
+                 predicted_boxes,
+                 detection_used,
+                 track_used,
+                 output,
+                 frame_size,
+                 unmatched_confirmed_tracks);
+
+        for (size_t det_index : high_indices) {
+            if (detection_used[det_index]) {
+                continue;
+            }
+
+            Track new_track;
+            new_track.id = next_track_id_++;
+            new_track.class_id = detections[det_index].class_id;
+            new_track.hits = 1;
+            new_track.confirmed = (config_.track_confirm_hits <= 1);
+            new_track.last_confidence = detections[det_index].confidence;
+            new_track.filter = kalmanFiltresiOlustur(detections[det_index].box);
+            new_track.estimated_box = kutuyuKirp(detections[det_index].box, frame_size);
+            tracks_.push_back(new_track);
+
+            Detection detected = detections[det_index];
+            detected.box = new_track.estimated_box;
+            detected.track_id = new_track.id;
+            detected.kalman_kullanildi = true;
+            output.push_back(detected);
+        }
+
+        for (Track& track : tracks_) {
+            if (!track.confirmed || track.missed_frames <= 0 || track.missed_frames > config_.track_visible_missed_frames) {
+                continue;
+            }
+
+            Detection predicted;
+            predicted.class_id = track.class_id;
+            predicted.confidence = std::max(track.last_confidence * 0.85f, 0.05f);
+            predicted.box = kutuyuKirp(track.estimated_box, frame_size);
+            predicted.track_id = track.id;
+            predicted.kalman_kullanildi = true;
+            predicted.predicted_only = true;
+            output.push_back(predicted);
+        }
+
+        tracks_.erase(remove_if(tracks_.begin(),
+                                tracks_.end(),
+                                [&](const Track& track) {
+                                    return track.missed_frames > config_.track_max_missed_frames;
+                                }),
+                      tracks_.end());
+
+        return output;
+    }
+
+private:
+    RuntimeConfig config_;
+    int next_track_id_ = 1;
+    vector<Track> tracks_;
+
+    void eslestir(const vector<size_t>& detection_indices,
+                  float min_iou,
+                  bool low_confidence_pass,
+                  vector<Detection>& detections,
+                  const vector<Rect>& predicted_boxes,
+                  vector<bool>& detection_used,
+                  vector<bool>& track_used,
+                  vector<Detection>& output,
+                  const Size& frame_size,
+                  const vector<size_t>& track_filter = {}) {
+        vector<size_t> candidate_tracks = track_filter;
+        if (candidate_tracks.empty()) {
+            candidate_tracks.resize(tracks_.size());
+            for (size_t i = 0; i < tracks_.size(); ++i) {
+                candidate_tracks[i] = i;
+            }
+        }
+
+        vector<MatchCandidate> candidates;
+        for (size_t track_index : candidate_tracks) {
+            if (track_index >= tracks_.size() || track_used[track_index]) {
+                continue;
+            }
+
+            for (size_t det_index : detection_indices) {
+                if (det_index >= detections.size() || detection_used[det_index]) {
+                    continue;
+                }
+                if (tracks_[track_index].class_id != detections[det_index].class_id) {
+                    continue;
+                }
+
+                const float iou = kutuIou(predicted_boxes[track_index], detections[det_index].box);
+                if (iou < min_iou) {
+                    continue;
+                }
+
+                const float score = iou + detections[det_index].confidence * 0.01f;
+                candidates.push_back({track_index, det_index, score});
+            }
+        }
+
+        sort(candidates.begin(), candidates.end(), [](const MatchCandidate& a, const MatchCandidate& b) {
+            return a.score > b.score;
+        });
+
+        for (const MatchCandidate& candidate : candidates) {
+            if (track_used[candidate.track_index] || detection_used[candidate.detection_index]) {
+                continue;
+            }
+
+            Track& track = tracks_[candidate.track_index];
+            Detection& detection = detections[candidate.detection_index];
+            const Point2f center = kutuMerkezi(detection.box);
+
+            Mat measurement(4, 1, CV_32F);
+            measurement.at<float>(0) = center.x;
+            measurement.at<float>(1) = center.y;
+            measurement.at<float>(2) = static_cast<float>(std::max(detection.box.width, 1));
+            measurement.at<float>(3) = static_cast<float>(std::max(detection.box.height, 1));
+
+            Mat estimated = track.filter.correct(measurement);
+            track.estimated_box = stateTenKutuOlustur(estimated, frame_size);
+            track.last_confidence = detection.confidence;
+            track.missed_frames = 0;
+            track.hits++;
+            if (track.hits >= config_.track_confirm_hits) {
+                track.confirmed = true;
+            }
+
+            detection.box = track.estimated_box;
+            detection.track_id = track.id;
+            detection.kalman_kullanildi = true;
+            detection.low_confidence_match = low_confidence_pass;
+
+            output.push_back(detection);
+            detection_used[candidate.detection_index] = true;
+            track_used[candidate.track_index] = true;
+        }
+    }
+};
 
 class OrtWorkerClient {
 public:
-    OrtWorkerClient(const fs::path& package_dir) {
+    explicit OrtWorkerClient(const WorkerLaunchOptions& options) : options_(options) {
         SECURITY_ATTRIBUTES sa{};
         sa.nLength = sizeof(sa);
         sa.bInheritHandle = TRUE;
@@ -455,7 +981,7 @@ public:
             throw runtime_error("STDIN pipe handle ayarlanamadi.");
         }
 
-        const fs::path worker_path = fs::absolute("scripts/ort_worker.py");
+        const fs::path worker_path = fs::absolute(options_.worker_script);
         if (!fs::exists(worker_path)) {
             CloseHandle(child_stdout_read);
             CloseHandle(child_stdout_write);
@@ -464,9 +990,14 @@ public:
             throw runtime_error("Worker script bulunamadi: " + worker_path.string());
         }
 
-        const wstring python_path = pythonYoluBul();
-        const wstring command = L"\"" + python_path + L"\" \"" + worker_path.wstring() +
-                                L"\" --package \"" + fs::absolute(package_dir).wstring() + L"\"";
+        const wstring python_path = pythonYoluBul(options_.python_path);
+        wostringstream command_stream;
+        command_stream << L"\"" << python_path << L"\" "
+                       << L"\"" << worker_path.wstring() << L"\" "
+                       << L"--package \"" << fs::absolute(options_.package_dir).wstring() << L"\" "
+                       << L"--conf-threshold " << options_.detector_conf_threshold << L" "
+                       << L"--nms-threshold " << options_.nms_threshold;
+        const wstring command = command_stream.str();
 
         STARTUPINFOW startup_info{};
         startup_info.cb = sizeof(startup_info);
@@ -523,8 +1054,12 @@ public:
     }
 
     InferenceResult tahminEt(const Mat& frame) {
+        if (!calisiyorMu()) {
+            throw runtime_error("Worker sureci calismiyor.");
+        }
+
         vector<uchar> jpeg_buffer;
-        vector<int> jpeg_params = {IMWRITE_JPEG_QUALITY, 90};
+        vector<int> jpeg_params = {IMWRITE_JPEG_QUALITY, options_.jpeg_quality};
         if (!imencode(".jpg", frame, jpeg_buffer, jpeg_params)) {
             throw runtime_error("Frame JPEG formatina donusturulemedi.");
         }
@@ -540,9 +1075,17 @@ public:
     }
 
 private:
+    WorkerLaunchOptions options_;
     HANDLE stdout_read_ = nullptr;
     HANDLE stdin_write_ = nullptr;
     PROCESS_INFORMATION process_info_{};
+
+    bool calisiyorMu() const {
+        if (process_info_.hProcess == nullptr) {
+            return false;
+        }
+        return WaitForSingleObject(process_info_.hProcess, 0) == WAIT_TIMEOUT;
+    }
 
     void kapat() {
         if (stdin_write_ != nullptr) {
@@ -565,19 +1108,19 @@ private:
     }
 
     InferenceResult cevapAyikla(const string& response) {
-        FileStorage fs(response, FileStorage::READ | FileStorage::MEMORY | FileStorage::FORMAT_JSON);
-        if (!fs.isOpened()) {
+        FileStorage fs_json(response, FileStorage::READ | FileStorage::MEMORY | FileStorage::FORMAT_JSON);
+        if (!fs_json.isOpened()) {
             throw runtime_error("Worker cevabi JSON olarak okunamadi: " + response);
         }
 
         string error_message;
-        fs["error"] >> error_message;
+        fs_json["error"] >> error_message;
         if (!error_message.empty()) {
             throw runtime_error("Worker hata verdi: " + error_message);
         }
 
         InferenceResult result;
-        FileNode timings_node = fs["timings_ms"];
+        FileNode timings_node = fs_json["timings_ms"];
         if (!timings_node.empty()) {
             timings_node["decode"] >> result.timings.decode_ms;
             timings_node["preprocess"] >> result.timings.preprocess_ms;
@@ -586,7 +1129,7 @@ private:
             timings_node["worker_total"] >> result.timings.worker_total_ms;
         }
 
-        FileNode detections_node = fs["detections"];
+        FileNode detections_node = fs_json["detections"];
         if (detections_node.type() != FileNode::SEQ) {
             return result;
         }
@@ -602,11 +1145,7 @@ private:
                 continue;
             }
 
-            const int left = bbox[0];
-            const int top = bbox[1];
-            const int right = bbox[2];
-            const int bottom = bbox[3];
-            det.box = Rect(Point(left, top), Point(right, bottom));
+            det.box = Rect(Point(bbox[0], bbox[1]), Point(bbox[2], bbox[3]));
             result.detections.push_back(det);
         }
 
@@ -614,61 +1153,211 @@ private:
     }
 };
 
+bool kameraAc(VideoCapture& cap, int camera_index, int attempts, int delay_ms) {
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        cap.release();
+        if (cap.open(camera_index)) {
+            return true;
+        }
+        this_thread::sleep_for(chrono::milliseconds(delay_ms));
+    }
+    return false;
+}
+
+string detectionJson(const Detection& detection, const vector<string>& labels) {
+    const string label = (detection.class_id >= 0 && detection.class_id < static_cast<int>(labels.size()))
+                             ? labels[detection.class_id]
+                             : ("class_" + to_string(detection.class_id));
+
+    ostringstream out;
+    out << "{"
+        << "\"class_id\":" << detection.class_id << ','
+        << "\"label\":\"" << jsonKacis(label) << "\","
+        << "\"track_id\":" << detection.track_id << ','
+        << "\"confidence\":" << fixed << setprecision(4) << detection.confidence << ','
+        << "\"predicted_only\":" << jsonBool(detection.predicted_only) << ','
+        << "\"low_confidence_match\":" << jsonBool(detection.low_confidence_match) << ','
+        << "\"bbox_xywh\":[" << detection.box.x << ',' << detection.box.y << ',' << detection.box.width << ','
+        << detection.box.height << "]}";
+    return out.str();
+}
+
+void telemetrySatiriYaz(JsonlLogger& logger,
+                        int frame_index,
+                        TakipDurumu takip_durumu,
+                        const vector<Detection>& detections,
+                        const vector<string>& labels,
+                        const TimingMetrics& timings,
+                        double worker_round_trip_ms,
+                        double tracker_ms,
+                        double render_ms,
+                        double frame_total_ms,
+                        double fps,
+                        int worker_restart_count,
+                        bool recorder_active,
+                        const string& recorder_path,
+                        bool primary_visible,
+                        int primary_target_id,
+                        int primary_track_id,
+                        const string& primary_label,
+                        const string& primary_confidence,
+                        int primary_cx,
+                        int primary_cy,
+                        int primary_z_cm,
+                        int primary_lost_frames) {
+    ostringstream out;
+    out << "{"
+        << "\"ts\":\"" << jsonKacis(zamanDamgasiOlustur()) << "\","
+        << "\"event\":\"frame\","
+        << "\"frame_index\":" << frame_index << ','
+        << "\"tracking_status\":\"" << takipDurumuMetni(takip_durumu) << "\","
+        << "\"worker_restart_count\":" << worker_restart_count << ','
+        << "\"recorder_active\":" << jsonBool(recorder_active) << ','
+        << "\"recorder_path\":\"" << jsonKacis(recorder_path) << "\","
+        << "\"fps\":" << fixed << setprecision(2) << fps << ','
+        << "\"timings_ms\":{"
+        << "\"round_trip\":" << worker_round_trip_ms << ','
+        << "\"decode\":" << timings.decode_ms << ','
+        << "\"preprocess\":" << timings.preprocess_ms << ','
+        << "\"inference\":" << timings.inference_ms << ','
+        << "\"postprocess\":" << timings.postprocess_ms << ','
+        << "\"worker_total\":" << timings.worker_total_ms << ','
+        << "\"tracker\":" << tracker_ms << ','
+        << "\"render\":" << render_ms << ','
+        << "\"frame_total\":" << frame_total_ms << "},";
+
+    if (primary_visible) {
+        out << "\"primary_target\":{"
+            << "\"class_id\":" << primary_target_id << ','
+            << "\"label\":\"" << jsonKacis(primary_label) << "\","
+            << "\"track_id\":" << primary_track_id << ','
+            << "\"confidence\":\"" << jsonKacis(primary_confidence) << "\","
+            << "\"x\":" << primary_cx << ','
+            << "\"y\":" << primary_cy << ','
+            << "\"z_cm\":" << primary_z_cm << "},";
+    } else {
+        out << "\"primary_target\":null,";
+    }
+
+    out << "\"primary_lost_frames\":" << primary_lost_frames << ','
+        << "\"detections\":[";
+
+    for (size_t i = 0; i < detections.size(); ++i) {
+        if (i > 0) {
+            out << ',';
+        }
+        out << detectionJson(detections[i], labels);
+    }
+
+    out << "]}";
+    logger.yaz(out.str());
+}
+
 int main(int argc, char** argv) {
     try {
-        const fs::path package_dir = (argc > 1) ? fs::path(argv[1]) : fs::path("deliverables/onnxruntime_cpu_package");
-        const PackageInfo package_info = paketiYukle(package_dir);
-        const vector<string> labels = etiketleriYukle(package_info.labels_path);
+        const AppOptions options = argumanlariAyristir(argc, argv);
+        RuntimeConfig config = configYukle(options.config_path);
+        applyOverrides(options, config);
+        configDogrula(config);
 
+        const PackageInfo package_info = paketiYukle(config.package_dir);
+        const vector<string> labels = etiketleriYukle(package_info.labels_path);
         if (package_info.class_count > 0 && static_cast<int>(labels.size()) != package_info.class_count) {
             throw runtime_error("labels.txt sinif sayisi manifest ile uyusmuyor.");
         }
 
+        if (!fs::exists(config.worker_script)) {
+            throw runtime_error("Worker script bulunamadi: " + config.worker_script.string());
+        }
+
         cout << "==========================================" << endl;
-        cout << "[SISTEM] ORT CPU destekli takip paketi yukleniyor..." << endl;
+        cout << "[SISTEM] Profesyonel runtime baslatiliyor..." << endl;
+        cout << "[CONFIG] " << fs::absolute(options.config_path).string() << endl;
         cout << "[PAKET] " << package_info.package_dir.string() << endl;
         cout << "[MODEL] " << package_info.model_path.filename().string() << endl;
         cout << "[ETIKET] " << labels.size() << " sinif" << endl;
         cout << "==========================================" << endl;
 
-        ofstream log_dosyasi("telemetri_log.txt", ios::app);
-        if (!log_dosyasi.is_open()) {
-            throw runtime_error("telemetri_log.txt acilamadi.");
-        }
-        log_dosyasi << "--- YENI ORT CPU OPERASYONU BASLADI ---" << endl;
+        JsonlLogger logger(config.log_dir);
+        logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"startup\",\"log_path\":\"" +
+                   jsonKacis(logger.path().string()) + "\"}");
 
-        OrtWorkerClient worker(package_info.package_dir);
-        DetectionTracker tracker;
+        WorkerLaunchOptions worker_options;
+        worker_options.package_dir = package_info.package_dir;
+        worker_options.worker_script = config.worker_script;
+        worker_options.python_path = config.python_path;
+        worker_options.detector_conf_threshold = config.detector_conf_threshold;
+        worker_options.nms_threshold = config.nms_threshold;
+        worker_options.jpeg_quality = config.worker_jpeg_quality;
+
+        auto worker = make_unique<OrtWorkerClient>(worker_options);
+        int worker_restart_count = 0;
+
+        DetectionTracker tracker(config);
         PrimaryLockState primary_lock;
+        FrameRecorder recorder;
 
-        VideoCapture cap(0);
-        if (!cap.isOpened()) {
+        VideoCapture cap;
+        if (!kameraAc(cap, config.camera_index, config.camera_reopen_attempts, config.camera_reopen_delay_ms)) {
             throw runtime_error("Kamera acilamadi.");
         }
+
+        logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"camera_ready\",\"camera_index\":" +
+                   to_string(config.camera_index) + "}");
 
         Mat frame;
         double smoothed_fps = 0.0;
         size_t previous_terminal_status_length = 0;
+        int frame_index = 0;
+
         while (true) {
             const auto frame_start = chrono::steady_clock::now();
-            cap.read(frame);
-            if (frame.empty()) {
-                break;
+
+            if (!cap.read(frame) || frame.empty()) {
+                logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) +
+                           "\",\"event\":\"camera_read_failed\",\"action\":\"reopen\"}");
+                if (!kameraAc(cap, config.camera_index, config.camera_reopen_attempts, config.camera_reopen_delay_ms) ||
+                    !cap.read(frame) || frame.empty()) {
+                    throw runtime_error("Kamera frame okuyamiyor.");
+                }
+            }
+
+            if (config.enable_recording && !recorder.aktif()) {
+                const double camera_fps = cap.get(CAP_PROP_FPS);
+                recorder.baslat(config.record_dir, frame.size(), camera_fps);
+                logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"recording_started\",\"path\":\"" +
+                           jsonKacis(recorder.yol().string()) + "\"}");
             }
 
             const auto worker_start = chrono::steady_clock::now();
-            const InferenceResult inference_result = worker.tahminEt(frame);
+            InferenceResult inference_result;
+            try {
+                inference_result = worker->tahminEt(frame);
+            } catch (const exception& ex) {
+                logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"worker_error\",\"message\":\"" +
+                           jsonKacis(ex.what()) + "\"}");
+                if (!config.worker_auto_restart || worker_restart_count >= config.worker_max_restarts) {
+                    throw;
+                }
+
+                worker = make_unique<OrtWorkerClient>(worker_options);
+                worker_restart_count++;
+                logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) +
+                           "\",\"event\":\"worker_restarted\",\"restart_count\":" + to_string(worker_restart_count) + "}");
+                inference_result = worker->tahminEt(frame);
+            }
+
             const auto worker_end = chrono::steady_clock::now();
             const vector<Detection> detections = tracker.guncelle(inference_result.detections, frame.size());
             const auto tracker_end = chrono::steady_clock::now();
-            const int primary_index = birincilHedefiSec(detections, frame.size(), primary_lock);
+            const int primary_index = birincilHedefiSec(config, detections, frame.size(), primary_lock);
 
             if (primary_index >= 0) {
                 primary_lock.active_track_id = detections[primary_index].track_id;
                 primary_lock.lost_frames = 0;
             } else if (primary_lock.active_track_id >= 0) {
                 primary_lock.lost_frames++;
-                if (primary_lock.lost_frames > PRIMARY_LOCK_MAX_LOST_FRAMES) {
+                if (primary_lock.lost_frames > config.primary_lock_max_lost_frames) {
                     primary_lock.active_track_id = -1;
                     primary_lock.lost_frames = 0;
                 }
@@ -698,23 +1387,32 @@ int main(int argc, char** argv) {
 
                 const int cx = box.x + box.width / 2;
                 const int cy = box.y + box.height / 2;
-                const int mesafe_z_cm = static_cast<int>((HEDEF_GERCEK_GENISLIK_CM * KAMERA_ODAK_UZAKLIGI) /
+                const int mesafe_z_cm = static_cast<int>((config.hedef_gercek_genislik_cm * config.kamera_odak_uzakligi) /
                                                          std::max(box.width, 1));
 
+                string takip_text = "T" + to_string(detection.track_id);
+                if (detection.predicted_only) {
+                    takip_text += " PRED";
+                } else if (detection.low_confidence_match) {
+                    takip_text += " LOW";
+                } else if (detection.kalman_kullanildi) {
+                    takip_text += " KF";
+                }
+
                 const string confidence_text = format("%.2f", detection.confidence);
-                const string takip_text = "T" + to_string(detection.track_id) + (detection.kalman_kullanildi ? " KF" : "");
                 const bool primary_lock_active =
                     primary_index >= 0 && static_cast<int>(detection_index) == primary_index &&
                     detection.track_id == primary_lock.active_track_id;
 
-                if (listedeVarMi(REFERANS_SINIFLAR, nesne_id)) {
-                    rectangle(frame, box, Scalar(255, 0, 0), 2);
+                if (listedeVarMi(config.referans_siniflar, nesne_id)) {
+                    const Scalar ref_color = detection.predicted_only ? Scalar(180, 0, 0) : Scalar(255, 0, 0);
+                    rectangle(frame, box, ref_color, 2);
                     putText(frame,
                             "REFERANS " + label + " " + to_string(mesafe_z_cm) + " cm",
                             Point(box.x, std::max(box.y - 10, 20)),
                             FONT_HERSHEY_SIMPLEX,
                             0.55,
-                            Scalar(255, 0, 0),
+                            ref_color,
                             2);
                     putText(frame,
                             takip_text,
@@ -723,8 +1421,10 @@ int main(int argc, char** argv) {
                             0.45,
                             Scalar(255, 180, 0),
                             1);
-                } else if (listedeVarMi(IZLENECEK_SINIFLAR, nesne_id)) {
-                    const Scalar tracked_color = primary_lock_active ? Scalar(0, 170, 255) : Scalar(0, 220, 255);
+                } else if (listedeVarMi(config.izlenecek_siniflar, nesne_id)) {
+                    const Scalar tracked_color = primary_lock_active
+                                                     ? Scalar(0, 170, 255)
+                                                     : (detection.predicted_only ? Scalar(80, 80, 255) : Scalar(0, 220, 255));
                     const Scalar center_color = primary_lock_active ? Scalar(0, 255, 0) : Scalar(0, 220, 255);
                     rectangle(frame, box, tracked_color, primary_lock_active ? 2 : 1);
                     circle(frame, Point(cx, cy), primary_lock_active ? 5 : 3, center_color, -1);
@@ -761,56 +1461,70 @@ int main(int argc, char** argv) {
                                 0.45,
                                 Scalar(255, 220, 0),
                                 1);
-
-                        log_dosyasi << "[" << zamanDamgasiOlustur() << "] GOZLEM -> X:" << cx
-                                    << " | Y:" << cy << " | Z:" << mesafe_z_cm << "cm | ID:" << nesne_id
-                                    << " | LABEL:" << label << " | CONF:" << confidence_text
-                                    << " | TRACK:" << detection.track_id << " | MODE:ODAK"
-                                    << " | LATENCY_WORKER:" << format("%.2f", inference_result.timings.worker_total_ms)
-                                    << "ms | LATENCY_INFER:" << format("%.2f", inference_result.timings.inference_ms)
-                                    << "ms" << endl;
                     } else {
                         putText(frame,
-                                "IZLEME " + label + " @" + confidence_text + " " + takip_text,
+                                (detection.predicted_only ? "TAHMIN " : "IZLEME ") + label + " @" + confidence_text + " " +
+                                    takip_text,
                                 Point(box.x, std::max(box.y - 8, 20)),
                                 FONT_HERSHEY_SIMPLEX,
                                 0.45,
-                                Scalar(0, 180, 255),
+                                tracked_color,
                                 1);
                     }
                 } else {
-                    rectangle(frame, box, Scalar(0, 255, 255), 1);
+                    const Scalar passive_color = detection.predicted_only ? Scalar(100, 100, 100) : Scalar(0, 255, 255);
+                    rectangle(frame, box, passive_color, 1);
                     putText(frame,
                             label + " @" + confidence_text + " " + takip_text,
                             Point(box.x, std::max(box.y - 8, 20)),
                             FONT_HERSHEY_SIMPLEX,
                             0.45,
-                            Scalar(0, 255, 255),
+                            passive_color,
                             1);
                 }
             }
 
             putText(frame,
-                    "ORT CPU  conf>" + format("%.2f", CONFIDENCE_THRESHOLD) + "  nms>" + format("%.2f", NMS_THRESHOLD) +
-                        "  kalman:on",
+                    "BYTE-STYLE TRACK  det>" + format("%.2f", config.detector_conf_threshold) + "  hi>" +
+                        format("%.2f", config.tracker_high_conf_threshold) + "  lo>" +
+                        format("%.2f", config.tracker_low_conf_threshold),
                     Point(20, 30),
                     FONT_HERSHEY_SIMPLEX,
-                    0.6,
+                    0.55,
                     Scalar(255, 255, 255),
                     2);
+
             putText(frame,
-                    primary_lock.active_track_id >= 0
-                        ? "AKTIF TAKIP: T" + to_string(primary_lock.active_track_id)
-                        : "AKTIF TAKIP: BEKLENIYOR",
+                    primary_lock.active_track_id >= 0 ? "AKTIF TAKIP: T" + to_string(primary_lock.active_track_id)
+                                                      : "AKTIF TAKIP: BEKLENIYOR",
                     Point(20, 58),
                     FONT_HERSHEY_SIMPLEX,
                     0.55,
                     primary_lock.active_track_id >= 0 ? Scalar(0, 255, 0) : Scalar(0, 220, 255),
                     2);
 
+            if (recorder.aktif()) {
+                putText(frame,
+                        "REC",
+                        Point(20, 86),
+                        FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        Scalar(0, 0, 255),
+                        2);
+            }
+
+            if (worker_restart_count > 0) {
+                putText(frame,
+                        "WORKER RESTART:" + to_string(worker_restart_count),
+                        Point(90, 86),
+                        FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        Scalar(0, 165, 255),
+                        1);
+            }
+
             const auto overlay_end = chrono::steady_clock::now();
-            const double worker_round_trip_ms =
-                chrono::duration<double, milli>(worker_end - worker_start).count();
+            const double worker_round_trip_ms = chrono::duration<double, milli>(worker_end - worker_start).count();
             const double tracker_ms = chrono::duration<double, milli>(tracker_end - worker_end).count();
             const double render_ms = chrono::duration<double, milli>(overlay_end - tracker_end).count();
             const double frame_total_ms = chrono::duration<double, milli>(overlay_end - frame_start).count();
@@ -825,20 +1539,21 @@ int main(int argc, char** argv) {
                 primary_telemetry_visible
                     ? std::min(100.0, std::max(0.0, static_cast<double>(primary_confidence_value) * 100.0))
                     : std::max(0.0,
-                               100.0 -
-                                   (primary_lock.lost_frames * 100.0 / std::max(PRIMARY_LOCK_MAX_LOST_FRAMES, 1)));
+                               100.0 - (primary_lock.lost_frames * 100.0 /
+                                         std::max(config.primary_lock_max_lost_frames, 1)));
 
             const string telemetry_line =
                 primary_telemetry_visible
                     ? "TS:" + zamanDamgasiOlustur() + " DURUM:" + takipDurumuMetni(takip_durumu) +
                           " X:" + to_string(primary_cx) + " Y:" + to_string(primary_cy) +
-                          " Z:" + to_string(primary_z_cm) + "cm ID:" + to_string(primary_target_id) +
-                          " " + primary_label + " T:" + to_string(primary_track_id) +
-                          " CONF:" + primary_confidence + " HEALTH:" + format("%.0f", track_health) + "%"
+                          " Z:" + to_string(primary_z_cm) + "cm ID:" + to_string(primary_target_id) + " " +
+                          primary_label + " T:" + to_string(primary_track_id) + " CONF:" + primary_confidence +
+                          " HEALTH:" + format("%.0f", track_health) + "%"
                     : "TS:" + zamanDamgasiOlustur() + " DURUM:" + takipDurumuMetni(takip_durumu) +
                           " T:" + (primary_lock.active_track_id >= 0 ? to_string(primary_lock.active_track_id) : "-") +
-                          " KAYIP:" + to_string(primary_lock.lost_frames) +
-                          " HEALTH:" + format("%.0f", track_health) + "%";
+                          " KAYIP:" + to_string(primary_lock.lost_frames) + " HEALTH:" +
+                          format("%.0f", track_health) + "%";
+
             const string latency_line =
                 "GECIKME RT:" + format("%.1f", worker_round_trip_ms) + "ms" +
                 " DEC:" + format("%.1f", inference_result.timings.decode_ms) + "ms" +
@@ -848,9 +1563,10 @@ int main(int argc, char** argv) {
                 " TRK:" + format("%.1f", tracker_ms) + "ms" +
                 " DRW:" + format("%.1f", render_ms) + "ms" +
                 " FRM:" + format("%.1f", frame_total_ms) + "ms";
+
             const string terminal_status = "[TEL] " + telemetry_line + " | " + latency_line;
             const size_t clear_padding =
-                (previous_terminal_status_length > terminal_status.size())
+                previous_terminal_status_length > terminal_status.size()
                     ? (previous_terminal_status_length - terminal_status.size())
                     : 0;
             cout << '\r' << terminal_status << string(clear_padding, ' ') << flush;
@@ -870,15 +1586,51 @@ int main(int argc, char** argv) {
                     Scalar(0, 255, 255),
                     2);
 
-            imshow("Kamera Takip Ekrani - ORT CPU Paket Modu", frame);
-            if (waitKey(1) == 27) {
-                break;
+            if (config.log_every_frame) {
+                telemetrySatiriYaz(logger,
+                                   frame_index,
+                                   takip_durumu,
+                                   detections,
+                                   labels,
+                                   inference_result.timings,
+                                   worker_round_trip_ms,
+                                   tracker_ms,
+                                   render_ms,
+                                   frame_total_ms,
+                                   smoothed_fps,
+                                   worker_restart_count,
+                                   recorder.aktif(),
+                                   recorder.aktif() ? recorder.yol().string() : "",
+                                   primary_telemetry_visible,
+                                   primary_target_id,
+                                   primary_track_id,
+                                   primary_label,
+                                   primary_confidence,
+                                   primary_cx,
+                                   primary_cy,
+                                   primary_z_cm,
+                                   primary_lock.lost_frames);
             }
+
+            if (recorder.aktif()) {
+                recorder.kareYaz(frame);
+            }
+
+            if (config.show_window) {
+                imshow("KORGAN - Professional Runtime", frame);
+                if (waitKey(1) == 27) {
+                    break;
+                }
+            }
+
+            frame_index++;
         }
 
         if (previous_terminal_status_length > 0) {
             cout << endl;
         }
+
+        logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"shutdown\"}");
         cap.release();
         destroyAllWindows();
         return 0;

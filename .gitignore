@@ -8,6 +8,11 @@ __pycache__/
 *.exe
 
 telemetri_log.txt
+logs/
+recordings/
+*.jsonl
+*.mp4
+*.avi
 
 c_cpp_properties.json
 

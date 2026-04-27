@@ -9,10 +9,6 @@ import numpy as np
 import onnxruntime as ort
 
 
-CONF_THRESHOLD = 0.45
-NMS_THRESHOLD = 0.45
-
-
 def clip_box(left: int, top: int, right: int, bottom: int, width: int, height: int) -> list[int]:
     left = max(0, min(left, width - 1))
     top = max(0, min(top, height - 1))
@@ -22,8 +18,10 @@ def clip_box(left: int, top: int, right: int, bottom: int, width: int, height: i
 
 
 class PackageSession:
-    def __init__(self, package_dir: Path) -> None:
+    def __init__(self, package_dir: Path, conf_threshold: float, nms_threshold: float) -> None:
         self.package_dir = package_dir.resolve()
+        self.conf_threshold = conf_threshold
+        self.nms_threshold = nms_threshold
         manifest_path = self.package_dir / "model-manifest.json"
         labels_path = self.package_dir / "labels.txt"
 
@@ -84,7 +82,7 @@ class PackageSession:
             scores = row[4:]
             class_id = int(np.argmax(scores))
             confidence = float(scores[class_id])
-            if confidence < CONF_THRESHOLD:
+            if confidence < self.conf_threshold:
                 continue
 
             cx, cy, width, height = row[:4]
@@ -102,7 +100,7 @@ class PackageSession:
 
         detections: list[dict] = []
         if boxes:
-            indices = cv2.dnn.NMSBoxes(boxes, confidences, CONF_THRESHOLD, NMS_THRESHOLD)
+            indices = cv2.dnn.NMSBoxes(boxes, confidences, self.conf_threshold, self.nms_threshold)
             if len(indices) > 0:
                 flat_indices = np.array(indices).reshape(-1).tolist()
                 for index in flat_indices:
@@ -146,9 +144,11 @@ def write_line(payload: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", required=True)
+    parser.add_argument("--conf-threshold", type=float, default=0.15)
+    parser.add_argument("--nms-threshold", type=float, default=0.45)
     args = parser.parse_args()
 
-    session = PackageSession(Path(args.package))
+    session = PackageSession(Path(args.package), args.conf_threshold, args.nms_threshold)
     sys.stdout.write("READY\n")
     sys.stdout.flush()
 

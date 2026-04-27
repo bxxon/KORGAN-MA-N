@@ -1,0 +1,41 @@
+{
+  "izlenecek_siniflar": [0, 32, 67],
+  "referans_siniflar": [39],
+  "distance": {
+    "hedef_gercek_genislik_cm": 25.0,
+    "kamera_odak_uzakligi": 600.0
+  },
+  "detection": {
+    "detector_conf_threshold": 0.15,
+    "tracker_high_conf_threshold": 0.45,
+    "tracker_low_conf_threshold": 0.15,
+    "nms_threshold": 0.45
+  },
+  "tracking": {
+    "track_match_iou_threshold": 0.30,
+    "low_conf_match_iou_threshold": 0.20,
+    "track_max_missed_frames": 12,
+    "track_visible_missed_frames": 4,
+    "track_confirm_hits": 2,
+    "primary_lock_max_lost_frames": 8,
+    "primary_lock_track_bonus": 0.35,
+    "primary_lock_center_weight": 0.25,
+    "primary_lock_area_weight": 0.15
+  },
+  "runtime": {
+    "camera_index": 0,
+    "show_window": 1,
+    "enable_recording": 0,
+    "record_dir": "recordings",
+    "log_dir": "logs",
+    "package_dir": "deliverables/onnxruntime_cpu_package",
+    "worker_script": "scripts/ort_worker.py",
+    "python_path": "",
+    "worker_jpeg_quality": 90,
+    "worker_auto_restart": 1,
+    "worker_max_restarts": 3,
+    "camera_reopen_attempts": 4,
+    "camera_reopen_delay_ms": 750,
+    "log_every_frame": 1
+  }
+}
