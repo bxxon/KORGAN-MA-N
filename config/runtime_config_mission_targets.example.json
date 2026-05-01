@@ -1,35 +1,34 @@
 {
-  "izlenecek_siniflar": [4, 14, 33],
-  "referans_siniflar": [],
   "hedef_profilleri": [
     {
-      "ad": "airplane",
-      "etiket": "airplane",
-      "gorunen_ad": "UCAK",
+      "ad": "drone",
+      "etiket": "drone",
+      "gorunen_ad": "DRONE",
+      "gercek_genislik_cm": 35.0,
+      "min_kilit_mesafe_m": 8.0,
+      "max_kilit_mesafe_m": 12.0,
+      "oncelik": 3
+    },
+    {
+      "ad": "f16",
+      "etiket": "f16",
+      "gorunen_ad": "F16",
       "gercek_genislik_cm": 990.0,
       "min_kilit_mesafe_m": 10.0,
-      "max_kilit_mesafe_m": 150.0,
+      "max_kilit_mesafe_m": 15.0,
       "oncelik": 5
     },
     {
-      "ad": "bird",
-      "etiket": "bird",
-      "gorunen_ad": "KUS",
-      "gercek_genislik_cm": 40.0,
-      "min_kilit_mesafe_m": 3.0,
-      "max_kilit_mesafe_m": 30.0,
-      "oncelik": 2
-    },
-    {
-      "ad": "kite",
-      "etiket": "kite",
-      "gorunen_ad": "UCAN_HEDEF",
-      "gercek_genislik_cm": 60.0,
-      "min_kilit_mesafe_m": 5.0,
-      "max_kilit_mesafe_m": 40.0,
-      "oncelik": 3
+      "ad": "rocket",
+      "etiket": "rocket",
+      "gorunen_ad": "ROKET",
+      "gercek_genislik_cm": 25.0,
+      "min_kilit_mesafe_m": 6.0,
+      "max_kilit_mesafe_m": 10.0,
+      "oncelik": 4
     }
   ],
+  "referans_siniflar": [],
   "distance": {
     "hedef_gercek_genislik_cm": 25.0,
     "kamera_odak_uzakligi": 600.0
@@ -50,8 +49,8 @@
     "primary_lock_track_bonus": 0.35,
     "primary_lock_center_weight": 0.25,
     "primary_lock_area_weight": 0.15,
-    "kilit_icin_mesafe_zorunlu": 0,
-    "kilit_aralik_bonus": 0.20
+    "kilit_icin_mesafe_zorunlu": 1,
+    "kilit_aralik_bonus": 0.35
   },
   "runtime": {
     "camera_index": 0,

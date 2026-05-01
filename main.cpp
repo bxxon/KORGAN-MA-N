@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,8 +32,20 @@ struct PrimaryLockState {
 
 enum class TakipDurumu {
     Bekleniyor,
+    KilitHazir,
     Izleniyor,
     Belirsiz
+};
+
+struct TargetProfile {
+    string ad;
+    string etiket;
+    string gorunen_ad;
+    float gercek_genislik_cm = 25.0f;
+    float min_kilit_mesafe_m = 0.0f;
+    float max_kilit_mesafe_m = 1000.0f;
+    int oncelik = 1;
+    int resolved_class_id = -1;
 };
 
 struct Detection {
@@ -68,6 +82,7 @@ struct PackageInfo {
 struct RuntimeConfig {
     vector<int> izlenecek_siniflar = {0, 32, 67};
     vector<int> referans_siniflar = {39};
+    vector<TargetProfile> hedef_profilleri;
 
     float hedef_gercek_genislik_cm = 25.0f;
     float kamera_odak_uzakligi = 600.0f;
@@ -87,6 +102,8 @@ struct RuntimeConfig {
     float primary_lock_track_bonus = 0.35f;
     float primary_lock_center_weight = 0.25f;
     float primary_lock_area_weight = 0.15f;
+    bool kilit_icin_mesafe_zorunlu = false;
+    float kilit_aralik_bonus = 0.20f;
 
     int camera_index = 0;
     bool show_window = true;
@@ -147,6 +164,14 @@ struct MatchCandidate {
 
 bool listedeVarMi(const vector<int>& liste, int id) {
     return find(liste.begin(), liste.end(), id) != liste.end();
+}
+
+string kucukHarf(string value) {
+    transform(value.begin(),
+              value.end(),
+              value.begin(),
+              [](unsigned char ch) { return static_cast<char>(tolower(ch)); });
+    return value;
 }
 
 string trim(const string& value) {
@@ -336,12 +361,43 @@ KalmanFilter kalmanFiltresiOlustur(const Rect& initial_box) {
 }
 
 int hedefOncelikPuani(const RuntimeConfig& config, int class_id) {
+    for (const auto& profile : config.hedef_profilleri) {
+        if (profile.resolved_class_id == class_id) {
+            return max(profile.oncelik, 0);
+        }
+    }
+
     for (size_t i = 0; i < config.izlenecek_siniflar.size(); ++i) {
         if (config.izlenecek_siniflar[i] == class_id) {
             return static_cast<int>(config.izlenecek_siniflar.size() - i);
         }
     }
     return 0;
+}
+
+const TargetProfile* hedefProfiliBul(const RuntimeConfig& config, int class_id) {
+    for (const auto& profile : config.hedef_profilleri) {
+        if (profile.resolved_class_id == class_id) {
+            return &profile;
+        }
+    }
+    return nullptr;
+}
+
+int hedefMesafesiCmHesapla(const RuntimeConfig& config, const Detection& detection, const TargetProfile* profile) {
+    const float gercek_genislik_cm =
+        (profile != nullptr && profile->gercek_genislik_cm > 0.0f) ? profile->gercek_genislik_cm
+                                                                    : config.hedef_gercek_genislik_cm;
+    return static_cast<int>((gercek_genislik_cm * config.kamera_odak_uzakligi) / std::max(detection.box.width, 1));
+}
+
+bool hedefKilitMesafesindeMi(const TargetProfile* profile, int mesafe_cm) {
+    if (profile == nullptr) {
+        return true;
+    }
+
+    const float mesafe_m = mesafe_cm / 100.0f;
+    return mesafe_m >= profile->min_kilit_mesafe_m && mesafe_m <= profile->max_kilit_mesafe_m;
 }
 
 float hedefSkoru(const RuntimeConfig& config,
@@ -357,16 +413,23 @@ float hedefSkoru(const RuntimeConfig& config,
         std::min(static_cast<float>(detection.box.area()) /
                      std::max(static_cast<float>(frame_size.area()) * 0.2f, 1.0f),
                  1.0f);
+    const TargetProfile* profile = hedefProfiliBul(config, detection.class_id);
+    const int mesafe_cm = hedefMesafesiCmHesapla(config, detection, profile);
+    const bool lock_in_range = hedefKilitMesafesindeMi(profile, mesafe_cm);
     const float continuity_bonus = (detection.track_id == active_track_id) ? config.primary_lock_track_bonus : 0.0f;
     const float class_bonus = 0.05f * hedefOncelikPuani(config, detection.class_id);
     const float predicted_penalty = detection.predicted_only ? 0.35f : 0.0f;
+    const float range_bonus = lock_in_range ? config.kilit_aralik_bonus : (profile != nullptr ? -0.15f : 0.0f);
 
     return detection.confidence + center_score * config.primary_lock_center_weight +
-           area_score * config.primary_lock_area_weight + continuity_bonus + class_bonus - predicted_penalty;
+           area_score * config.primary_lock_area_weight + continuity_bonus + class_bonus + range_bonus -
+           predicted_penalty;
 }
 
 string takipDurumuMetni(TakipDurumu durum) {
     switch (durum) {
+        case TakipDurumu::KilitHazir:
+            return "KILIT_HAZIR";
         case TakipDurumu::Izleniyor:
             return "IZLENIYOR";
         case TakipDurumu::Belirsiz:
@@ -385,6 +448,12 @@ int birincilHedefiSec(const RuntimeConfig& config,
 
     for (size_t i = 0; i < detections.size(); ++i) {
         if (detections[i].predicted_only || !listedeVarMi(config.izlenecek_siniflar, detections[i].class_id)) {
+            continue;
+        }
+
+        const TargetProfile* profile = hedefProfiliBul(config, detections[i].class_id);
+        if (config.kilit_icin_mesafe_zorunlu && profile != nullptr &&
+            !hedefKilitMesafesindeMi(profile, hedefMesafesiCmHesapla(config, detections[i], profile))) {
             continue;
         }
 
@@ -444,6 +513,31 @@ RuntimeConfig configYukle(const fs::path& config_path) {
     alanOku(fs_config.root(), "izlenecek_siniflar", config.izlenecek_siniflar);
     alanOku(fs_config.root(), "referans_siniflar", config.referans_siniflar);
 
+    FileNode hedef_profilleri = fs_config["hedef_profilleri"];
+    if (!hedef_profilleri.empty()) {
+        config.hedef_profilleri.clear();
+        for (FileNodeIterator it = hedef_profilleri.begin(); it != hedef_profilleri.end(); ++it) {
+            const FileNode item = *it;
+            TargetProfile profile;
+            alanOku(item, "ad", profile.ad);
+            alanOku(item, "etiket", profile.etiket);
+            alanOku(item, "gorunen_ad", profile.gorunen_ad);
+            alanOku(item, "gercek_genislik_cm", profile.gercek_genislik_cm);
+            alanOku(item, "min_kilit_mesafe_m", profile.min_kilit_mesafe_m);
+            alanOku(item, "max_kilit_mesafe_m", profile.max_kilit_mesafe_m);
+            alanOku(item, "oncelik", profile.oncelik);
+
+            if (profile.ad.empty()) {
+                profile.ad = !profile.gorunen_ad.empty() ? profile.gorunen_ad : profile.etiket;
+            }
+            if (profile.gorunen_ad.empty()) {
+                profile.gorunen_ad = !profile.ad.empty() ? profile.ad : profile.etiket;
+            }
+
+            config.hedef_profilleri.push_back(profile);
+        }
+    }
+
     FileNode distance = fs_config["distance"];
     if (!distance.empty()) {
         alanOku(distance, "hedef_gercek_genislik_cm", config.hedef_gercek_genislik_cm);
@@ -469,6 +563,8 @@ RuntimeConfig configYukle(const fs::path& config_path) {
         alanOku(tracking, "primary_lock_track_bonus", config.primary_lock_track_bonus);
         alanOku(tracking, "primary_lock_center_weight", config.primary_lock_center_weight);
         alanOku(tracking, "primary_lock_area_weight", config.primary_lock_area_weight);
+        boolAlanOku(tracking, "kilit_icin_mesafe_zorunlu", config.kilit_icin_mesafe_zorunlu);
+        alanOku(tracking, "kilit_aralik_bonus", config.kilit_aralik_bonus);
     }
 
     FileNode runtime = fs_config["runtime"];
@@ -493,7 +589,7 @@ RuntimeConfig configYukle(const fs::path& config_path) {
 }
 
 void configDogrula(const RuntimeConfig& config) {
-    if (config.izlenecek_siniflar.empty()) {
+    if (config.izlenecek_siniflar.empty() && config.hedef_profilleri.empty()) {
         throw runtime_error("Config hatasi: izlenecek_siniflar bos olamaz.");
     }
     if (config.hedef_gercek_genislik_cm <= 0.0f || config.kamera_odak_uzakligi <= 0.0f) {
@@ -518,6 +614,66 @@ void configDogrula(const RuntimeConfig& config) {
     if (config.worker_jpeg_quality < 50 || config.worker_jpeg_quality > 100) {
         throw runtime_error("Config hatasi: worker_jpeg_quality 50 ile 100 arasinda olmalidir.");
     }
+    if (config.kilit_aralik_bonus < 0.0f || config.kilit_aralik_bonus > 1.0f) {
+        throw runtime_error("Config hatasi: kilit_aralik_bonus 0.0 ile 1.0 arasinda olmalidir.");
+    }
+
+    set<string> profile_adlari;
+    set<string> profile_etiketleri;
+    for (const auto& profile : config.hedef_profilleri) {
+        if (profile.ad.empty() || profile.etiket.empty()) {
+            throw runtime_error("Config hatasi: hedef_profilleri icindeki her kayitta ad ve etiket dolu olmalidir.");
+        }
+        if (profile.gercek_genislik_cm <= 0.0f) {
+            throw runtime_error("Config hatasi: hedef profil gercek_genislik_cm sifirdan buyuk olmalidir.");
+        }
+        if (profile.min_kilit_mesafe_m < 0.0f || profile.max_kilit_mesafe_m <= 0.0f ||
+            profile.min_kilit_mesafe_m > profile.max_kilit_mesafe_m) {
+            throw runtime_error("Config hatasi: hedef profil kilit mesafesi araligi gecersiz.");
+        }
+        if (profile.oncelik < 1) {
+            throw runtime_error("Config hatasi: hedef profil oncelik en az 1 olmalidir.");
+        }
+
+        const string ad_key = kucukHarf(profile.ad);
+        const string etiket_key = kucukHarf(profile.etiket);
+        if (!profile_adlari.insert(ad_key).second) {
+            throw runtime_error("Config hatasi: hedef profil adlari benzersiz olmalidir.");
+        }
+        if (!profile_etiketleri.insert(etiket_key).second) {
+            throw runtime_error("Config hatasi: hedef profil etiketleri benzersiz olmalidir.");
+        }
+    }
+}
+
+int etiketeGoreSinifIdBul(const vector<string>& labels, const string& etiket) {
+    const string hedef = kucukHarf(trim(etiket));
+    for (size_t i = 0; i < labels.size(); ++i) {
+        if (kucukHarf(trim(labels[i])) == hedef) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+vector<string> hedefProfilleriniEsle(RuntimeConfig& config, const vector<string>& labels) {
+    vector<string> warnings;
+    if (config.hedef_profilleri.empty()) {
+        return warnings;
+    }
+
+    config.izlenecek_siniflar.clear();
+    for (auto& profile : config.hedef_profilleri) {
+        profile.resolved_class_id = etiketeGoreSinifIdBul(labels, profile.etiket);
+        if (profile.resolved_class_id < 0) {
+            warnings.push_back("Hedef profili eslesmedi: " + profile.ad + " -> " + profile.etiket);
+            continue;
+        }
+
+        config.izlenecek_siniflar.push_back(profile.resolved_class_id);
+    }
+
+    return warnings;
 }
 
 void applyOverrides(const AppOptions& options, RuntimeConfig& config) {
@@ -1199,11 +1355,16 @@ void telemetrySatiriYaz(JsonlLogger& logger,
                         bool primary_visible,
                         int primary_target_id,
                         int primary_track_id,
+                        const string& primary_profile_name,
                         const string& primary_label,
                         const string& primary_confidence,
                         int primary_cx,
                         int primary_cy,
                         int primary_z_cm,
+                        bool primary_in_lock_window,
+                        double primary_min_lock_distance_m,
+                        double primary_max_lock_distance_m,
+                        bool primary_engagement_allowed,
                         int primary_lost_frames) {
     ostringstream out;
     out << "{"
@@ -1229,12 +1390,18 @@ void telemetrySatiriYaz(JsonlLogger& logger,
     if (primary_visible) {
         out << "\"primary_target\":{"
             << "\"class_id\":" << primary_target_id << ','
+            << "\"profile\":\"" << jsonKacis(primary_profile_name) << "\","
             << "\"label\":\"" << jsonKacis(primary_label) << "\","
             << "\"track_id\":" << primary_track_id << ','
             << "\"confidence\":\"" << jsonKacis(primary_confidence) << "\","
             << "\"x\":" << primary_cx << ','
             << "\"y\":" << primary_cy << ','
-            << "\"z_cm\":" << primary_z_cm << "},";
+            << "\"z_cm\":" << primary_z_cm << ','
+            << "\"distance_m\":" << fixed << setprecision(2) << (primary_z_cm / 100.0) << ','
+            << "\"in_lock_window\":" << jsonBool(primary_in_lock_window) << ','
+            << "\"lock_window_m\":[" << fixed << setprecision(2) << primary_min_lock_distance_m << ','
+            << primary_max_lock_distance_m << "],"
+            << "\"engagement_allowed\":" << jsonBool(primary_engagement_allowed) << "},";
     } else {
         out << "\"primary_target\":null,";
     }
@@ -1281,6 +1448,18 @@ int main(int argc, char** argv) {
         JsonlLogger logger(config.log_dir);
         logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"startup\",\"log_path\":\"" +
                    jsonKacis(logger.path().string()) + "\"}");
+
+        const vector<string> target_profile_warnings = hedefProfilleriniEsle(config, labels);
+        for (const auto& warning : target_profile_warnings) {
+            cout << "[UYARI] " << warning << endl;
+            logger.yaz("{\"ts\":\"" + jsonKacis(zamanDamgasiOlustur()) + "\",\"event\":\"target_profile_warning\",\"message\":\"" +
+                       jsonKacis(warning) + "\"}");
+        }
+
+        if (!config.hedef_profilleri.empty()) {
+            cout << "[HEDEFLER] " << config.izlenecek_siniflar.size() << "/" << config.hedef_profilleri.size()
+                 << " profil aktif." << endl;
+        }
 
         WorkerLaunchOptions worker_options;
         worker_options.package_dir = package_info.package_dir;
@@ -1369,9 +1548,14 @@ int main(int argc, char** argv) {
             int primary_z_cm = 0;
             int primary_target_id = -1;
             int primary_track_id = -1;
+            string primary_profile_name = "-";
             string primary_label = "-";
             string primary_confidence = "0.00";
             float primary_confidence_value = 0.0f;
+            bool primary_in_lock_window = false;
+            bool primary_engagement_allowed = false;
+            double primary_min_lock_distance_m = 0.0;
+            double primary_max_lock_distance_m = 0.0;
 
             for (size_t detection_index = 0; detection_index < detections.size(); ++detection_index) {
                 const auto& detection = detections[detection_index];
@@ -1384,11 +1568,14 @@ int main(int argc, char** argv) {
                 const string label = (nesne_id >= 0 && nesne_id < static_cast<int>(labels.size()))
                                          ? labels[nesne_id]
                                          : ("class_" + to_string(nesne_id));
+                const TargetProfile* target_profile = hedefProfiliBul(config, nesne_id);
+                const string gorunen_label =
+                    (target_profile != nullptr && !target_profile->gorunen_ad.empty()) ? target_profile->gorunen_ad : label;
 
                 const int cx = box.x + box.width / 2;
                 const int cy = box.y + box.height / 2;
-                const int mesafe_z_cm = static_cast<int>((config.hedef_gercek_genislik_cm * config.kamera_odak_uzakligi) /
-                                                         std::max(box.width, 1));
+                const int mesafe_z_cm = hedefMesafesiCmHesapla(config, detection, target_profile);
+                const bool lock_in_range = hedefKilitMesafesindeMi(target_profile, mesafe_z_cm);
 
                 string takip_text = "T" + to_string(detection.track_id);
                 if (detection.predicted_only) {
@@ -1423,9 +1610,11 @@ int main(int argc, char** argv) {
                             1);
                 } else if (listedeVarMi(config.izlenecek_siniflar, nesne_id)) {
                     const Scalar tracked_color = primary_lock_active
-                                                     ? Scalar(0, 170, 255)
-                                                     : (detection.predicted_only ? Scalar(80, 80, 255) : Scalar(0, 220, 255));
-                    const Scalar center_color = primary_lock_active ? Scalar(0, 255, 0) : Scalar(0, 220, 255);
+                                                     ? (lock_in_range ? Scalar(0, 255, 0) : Scalar(0, 170, 255))
+                                                     : (detection.predicted_only ? Scalar(80, 80, 255)
+                                                                                 : (lock_in_range ? Scalar(0, 220, 255)
+                                                                                                  : Scalar(0, 140, 255)));
+                    const Scalar center_color = lock_in_range ? Scalar(0, 255, 0) : Scalar(0, 220, 255);
                     rectangle(frame, box, tracked_color, primary_lock_active ? 2 : 1);
                     circle(frame, Point(cx, cy), primary_lock_active ? 5 : 3, center_color, -1);
 
@@ -1436,26 +1625,39 @@ int main(int argc, char** argv) {
                         primary_z_cm = mesafe_z_cm;
                         primary_target_id = nesne_id;
                         primary_track_id = detection.track_id;
-                        primary_label = label;
+                        primary_profile_name = target_profile != nullptr ? target_profile->ad : label;
+                        primary_label = gorunen_label;
                         primary_confidence = confidence_text;
                         primary_confidence_value = detection.confidence;
+                        primary_in_lock_window = lock_in_range;
+                        primary_engagement_allowed = lock_in_range;
+                        primary_min_lock_distance_m =
+                            target_profile != nullptr ? target_profile->min_kilit_mesafe_m : 0.0;
+                        primary_max_lock_distance_m =
+                            target_profile != nullptr ? target_profile->max_kilit_mesafe_m : 0.0;
 
                         putText(frame,
-                                "ODAK " + label + " @" + confidence_text + " Z:" + to_string(mesafe_z_cm) + "cm",
+                                string(lock_in_range ? "KILIT HAZIR " : "ODAK ") + gorunen_label + " @" +
+                                    confidence_text + " Z:" + format("%.2f", mesafe_z_cm / 100.0) + "m",
                                 Point(box.x, std::max(box.y - 10, 20)),
                                 FONT_HERSHEY_SIMPLEX,
                                 0.55,
-                                Scalar(0, 170, 255),
+                                lock_in_range ? Scalar(0, 255, 0) : Scalar(0, 170, 255),
                                 2);
                         putText(frame,
-                                "X:" + to_string(cx) + " Y:" + to_string(cy) + " Z:" + to_string(mesafe_z_cm),
+                                "X:" + to_string(cx) + " Y:" + to_string(cy) + " Z:" +
+                                    format("%.2f", mesafe_z_cm / 100.0) + "m" +
+                                    (target_profile != nullptr
+                                         ? " ARALIK:" + format("%.1f", target_profile->min_kilit_mesafe_m) + "-" +
+                                               format("%.1f", target_profile->max_kilit_mesafe_m) + "m"
+                                         : ""),
                                 Point(box.x, std::min(box.y + box.height + 20, frame.rows - 10)),
                                 FONT_HERSHEY_SIMPLEX,
                                 0.5,
-                                Scalar(0, 255, 0),
+                                lock_in_range ? Scalar(0, 255, 0) : Scalar(0, 220, 255),
                                 2);
                         putText(frame,
-                                takip_text + " ODAK",
+                                takip_text + (lock_in_range ? " ATIS_PENCERESI" : " MESAFE_DISI"),
                                 Point(std::max(box.x - 2, 0), std::min(box.y + box.height + 40, frame.rows - 10)),
                                 FONT_HERSHEY_SIMPLEX,
                                 0.45,
@@ -1463,8 +1665,11 @@ int main(int argc, char** argv) {
                                 1);
                     } else {
                         putText(frame,
-                                (detection.predicted_only ? "TAHMIN " : "IZLEME ") + label + " @" + confidence_text + " " +
-                                    takip_text,
+                                (detection.predicted_only ? "TAHMIN " : "IZLEME ") + gorunen_label + " @" +
+                                    confidence_text + " " + takip_text +
+                                    (target_profile != nullptr
+                                         ? " Z:" + format("%.2f", mesafe_z_cm / 100.0) + "m"
+                                         : ""),
                                 Point(box.x, std::max(box.y - 8, 20)),
                                 FONT_HERSHEY_SIMPLEX,
                                 0.45,
@@ -1532,7 +1737,8 @@ int main(int argc, char** argv) {
             smoothed_fps = (smoothed_fps <= 0.0) ? instantaneous_fps : (smoothed_fps * 0.9 + instantaneous_fps * 0.1);
 
             const TakipDurumu takip_durumu = primary_telemetry_visible
-                                                 ? TakipDurumu::Izleniyor
+                                                 ? (primary_in_lock_window ? TakipDurumu::KilitHazir
+                                                                           : TakipDurumu::Izleniyor)
                                                  : (primary_lock.active_track_id >= 0 ? TakipDurumu::Belirsiz
                                                                                       : TakipDurumu::Bekleniyor);
             const double track_health =
@@ -1546,8 +1752,9 @@ int main(int argc, char** argv) {
                 primary_telemetry_visible
                     ? "TS:" + zamanDamgasiOlustur() + " DURUM:" + takipDurumuMetni(takip_durumu) +
                           " X:" + to_string(primary_cx) + " Y:" + to_string(primary_cy) +
-                          " Z:" + to_string(primary_z_cm) + "cm ID:" + to_string(primary_target_id) + " " +
+                          " Z:" + format("%.2f", primary_z_cm / 100.0) + "m ID:" + to_string(primary_target_id) + " " +
                           primary_label + " T:" + to_string(primary_track_id) + " CONF:" + primary_confidence +
+                          " KILIT:" + (primary_in_lock_window ? "UYGUN" : "MESAFE_DISI") +
                           " HEALTH:" + format("%.0f", track_health) + "%"
                     : "TS:" + zamanDamgasiOlustur() + " DURUM:" + takipDurumuMetni(takip_durumu) +
                           " T:" + (primary_lock.active_track_id >= 0 ? to_string(primary_lock.active_track_id) : "-") +
@@ -1604,11 +1811,16 @@ int main(int argc, char** argv) {
                                    primary_telemetry_visible,
                                    primary_target_id,
                                    primary_track_id,
+                                   primary_profile_name,
                                    primary_label,
                                    primary_confidence,
                                    primary_cx,
                                    primary_cy,
                                    primary_z_cm,
+                                   primary_in_lock_window,
+                                   primary_min_lock_distance_m,
+                                   primary_max_lock_distance_m,
+                                   primary_engagement_allowed,
                                    primary_lock.lost_frames);
             }
 

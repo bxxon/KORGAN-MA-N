@@ -12,10 +12,13 @@ class RuntimeFilesTest(unittest.TestCase):
         data = json.loads(config_path.read_text(encoding="utf-8"))
 
         detection = data["detection"]
+        tracking = data["tracking"]
         self.assertLessEqual(detection["detector_conf_threshold"], detection["tracker_low_conf_threshold"])
         self.assertLessEqual(detection["tracker_low_conf_threshold"], detection["tracker_high_conf_threshold"])
         self.assertLessEqual(detection["tracker_high_conf_threshold"], 1.0)
         self.assertLessEqual(detection["nms_threshold"], 1.0)
+        self.assertGreaterEqual(tracking["kilit_aralik_bonus"], 0.0)
+        self.assertLessEqual(tracking["kilit_aralik_bonus"], 1.0)
 
     def test_runtime_paths_exist(self) -> None:
         config_path = REPO_ROOT / "config" / "runtime_config.json"
@@ -33,6 +36,31 @@ class RuntimeFilesTest(unittest.TestCase):
         self.assertEqual(data["runtime"]["engine"], "onnxruntime")
         self.assertIn("model", data["files"])
         self.assertIn("labels", data["files"])
+
+    def test_mission_target_example_profiles_are_valid(self) -> None:
+        config_path = REPO_ROOT / "config" / "runtime_config_mission_targets.example.json"
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+
+        profiles = data["hedef_profilleri"]
+        self.assertGreaterEqual(len(profiles), 3)
+
+        seen_names: set[str] = set()
+        seen_labels: set[str] = set()
+        for profile in profiles:
+            self.assertTrue(profile["ad"])
+            self.assertTrue(profile["etiket"])
+            self.assertGreater(profile["gercek_genislik_cm"], 0.0)
+            self.assertGreaterEqual(profile["min_kilit_mesafe_m"], 0.0)
+            self.assertLessEqual(profile["min_kilit_mesafe_m"], profile["max_kilit_mesafe_m"])
+            self.assertGreater(profile["oncelik"], 0)
+            self.assertNotIn(profile["ad"], seen_names)
+            self.assertNotIn(profile["etiket"], seen_labels)
+            seen_names.add(profile["ad"])
+            seen_labels.add(profile["etiket"])
+
+        tracking = data["tracking"]
+        self.assertEqual(tracking["kilit_icin_mesafe_zorunlu"], 1)
+        self.assertGreater(tracking["kilit_aralik_bonus"], 0.0)
 
 
 if __name__ == "__main__":

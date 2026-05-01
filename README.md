@@ -18,15 +18,20 @@ Bu repo, projeyi tekrar derlemek, calistirmak, gelistirmek ve GitHub uzerinden d
 
 Varsayilan takip edilen siniflar:
 
-- `0` -> `person`
-- `32` -> `sports ball`
-- `67` -> `cell phone`
+- `4` -> `airplane`
+- `14` -> `bird`
+- `33` -> `kite`
 
 Referans sinif:
 
-- `39` -> `bottle`
+- varsayilan olarak bos
 
 Bu ayarlar [main.cpp](/C:/Users/askan/Desktop/KORGAN/main.cpp:16) tarafinda tanimlidir.
+
+Not:
+
+- mevcut COCO model `drone` veya `f16` diye ayri sinif bilmez
+- ama sahnedeki hava hedefi goruntusune gore bunlari gecici olarak `airplane`, `bird` veya `kite` gibi siniflara dusurebilir
 
 ## Mimari ozet
 
@@ -53,11 +58,13 @@ Calisma akisi kisaca soyledir:
 ```text
 KORGAN/
 |- config/
-|  `- runtime_config.json
+|  |- runtime_config.json
+|  `- runtime_config_mission_targets.example.json
 |- main.cpp
 |- scripts/
 |  |- build_opencv.bat
 |  |- run_opencv.bat
+|  |- analyze_telemetry.py
 |  `- ort_worker.py
 |- deliverables/
 |  |- model.onnx
@@ -82,7 +89,9 @@ Dosyalarin ne oldugu:
 - [scripts/ort_worker.py](/C:/Users/askan/Desktop/KORGAN/scripts/ort_worker.py:1): ONNX Runtime worker. Model yukleme, preprocess, inference ve NMS burada.
 - [scripts/build_opencv.bat](/C:/Users/askan/Desktop/KORGAN/scripts/build_opencv.bat:1): MSVC + OpenCV ile `main.cpp` dosyasini `hss_sistem.exe` olarak derler.
 - [scripts/run_opencv.bat](/C:/Users/askan/Desktop/KORGAN/scripts/run_opencv.bat:1): Gerekli PATH ayarlarini yapip uygulamayi baslatir, ek argumanlari da iletir.
+- [scripts/analyze_telemetry.py](/C:/Users/askan/Desktop/KORGAN/scripts/analyze_telemetry.py:1): JSONL telemetry loglarini ozetler.
 - [config/runtime_config.json](/C:/Users/askan/Desktop/KORGAN/config/runtime_config.json:1): Runtime ayarlari, threshold'lar, klasorler ve yeniden baslatma davranisi burada.
+- [config/runtime_config_mission_targets.example.json](/C:/Users/askan/Desktop/KORGAN/config/runtime_config_mission_targets.example.json:1): Drone/F16/roket gorev profili ornegi.
 - [deliverables/model-manifest.json](/C:/Users/askan/Desktop/KORGAN/deliverables/model-manifest.json:1): Model paketi tanimi.
 - [deliverables/labels.txt](/C:/Users/askan/Desktop/KORGAN/deliverables/labels.txt:1): Sinif isimleri.
 - [deliverables/onnxruntime_cpu_package/model-manifest.json](/C:/Users/askan/Desktop/KORGAN/deliverables/onnxruntime_cpu_package/model-manifest.json:1): Uygulamanin varsayilan olarak kullandigi paket manifesti.
@@ -95,7 +104,7 @@ Dosyalarin ne oldugu:
 Bu proje mevcut haliyle Windows odakli yazilmistir.
 
 - Windows 10 veya Windows 11
-- Visual Studio 2022 Build Tools
+- Visual Studio 2022 veya Visual Studio 2022 Build Tools
 - MSVC toolchain
 - Windows SDK
 - OpenCV
@@ -133,6 +142,150 @@ Son guncellemelerle birlikte proje daha operasyonel bir yapiya tasinmistir:
 - `logs/` altinda JSONL telemetry
 - `recordings/` altinda opsiyonel video kaydi
 - GitHub Actions CI ve temel runtime testleri
+
+## Kurulum Ozeti
+
+Projeyi baska bir bilgisayarda sifirdan acacaksan asagidaki dis bagimliliklar gereklidir:
+
+- Visual Studio 2022
+- `Desktop development with C++` workload
+- MSVC `v143` toolset
+- Windows 10/11 SDK
+- OpenCV
+- Python 3.12
+- Python paketleri: `opencv-python`, `numpy`, `onnxruntime`
+
+En kritik iki harici kurulum:
+
+- OpenCV
+- Python ve pip paketleri
+
+## Visual Studio 2022 ile Acma
+
+Mor ikonlu `Visual Studio 2022` kullaniyorsan repo artik solution ile acilabilir:
+
+1. Visual Studio 2022'yi ac
+2. `Open a project or solution` sec
+3. [KORGAN.sln](/C:/Users/askan/Desktop/KORGAN/KORGAN.sln:1) dosyasini ac
+4. Ustten `Debug` veya `Release`, `x64` sec
+5. `Ctrl + Shift + B` ile build al
+6. `Local Windows Debugger` veya `Ctrl + F5` ile calistir
+
+Solution icin eklenen dosyalar:
+
+- [KORGAN.sln](/C:/Users/askan/Desktop/KORGAN/KORGAN.sln:1)
+- [KORGAN.vcxproj](/C:/Users/askan/Desktop/KORGAN/KORGAN.vcxproj:1)
+- [KORGAN.vcxproj.filters](/C:/Users/askan/Desktop/KORGAN/KORGAN.vcxproj.filters:1)
+
+Build ciktisi varsayilan olarak su klasorlere gider:
+
+- `build\Debug\hss_sistem.exe`
+- `build\Release\hss_sistem.exe`
+
+## VS Code ile Acma
+
+Mavi ikonlu `VS Code` kullaniyorsan `.sln` acmana gerek yoktur. Klasoru dogrudan acabilirsin.
+
+Repo icindeki `.vscode` ayarlari sayesinde:
+
+- `tasks.json` ile build
+- `launch.json` ile debug
+- `c_cpp_properties.json` ile IntelliSense
+
+temel olarak hazirdir.
+
+## Hangi Seyler Disaridan Kurulu Olmali
+
+### 1. Visual Studio C++ gelistirme bilesenleri
+
+Visual Studio Installer icinde su bilesenlerin kurulu oldugunu dogrula:
+
+- `Desktop development with C++`
+- `MSVC v143`
+- `Windows 10/11 SDK`
+
+### 2. OpenCV
+
+Bu repo su an asagidaki Windows yolunu varsayar:
+
+```text
+C:\opencv\build\
+```
+
+Ozellikle su dosyalarin varligi beklenir:
+
+- `C:\opencv\build\include`
+- `C:\opencv\build\x64\vc16\lib\opencv_world4120.lib`
+- `C:\opencv\build\x64\vc16\lib\opencv_world4120d.lib`
+- `C:\opencv\build\x64\vc16\bin\opencv_world4120.dll`
+- `C:\opencv\build\x64\vc16\bin\opencv_world4120d.dll`
+
+### 3. Python
+
+Beklenen varsayilan yol:
+
+```text
+C:\Users\askan\AppData\Local\Programs\Python\Python312\python.exe
+```
+
+Eger Python farkli yerdeyse su sekillerden biri kullanilabilir:
+
+```powershell
+$env:KORGAN_PYTHON="C:\tam\yol\python.exe"
+```
+
+veya:
+
+```powershell
+.\hss_sistem.exe --python C:\tam\yol\python.exe
+```
+
+### 4. Python paketleri
+
+Kurulum:
+
+```powershell
+pip install opencv-python numpy onnxruntime
+```
+
+## Hizli Kurulum Kontrol Listesi
+
+Su kontrolleri yaparsan sistemin hazir olup olmadigini hizlica anlarsin:
+
+1. Visual Studio Installer icinde `Desktop development with C++` kurulu mu
+2. `C:\opencv\build\include` klasoru var mi
+3. `C:\opencv\build\x64\vc16\lib\opencv_world4120.lib` dosyasi var mi
+4. `C:\Users\askan\AppData\Local\Programs\Python\Python312\python.exe` var mi
+5. `pip show onnxruntime` komutu sonuc veriyor mu
+
+## Kurulum Sonrasi Dogrulama
+
+### Visual Studio 2022 ile
+
+- [KORGAN.sln](/C:/Users/askan/Desktop/KORGAN/KORGAN.sln:1) acilmali
+- `Debug|x64` ve `Release|x64` build alinabilmeli
+
+### Komut satiri ile
+
+Derleme:
+
+```powershell
+scripts\build_opencv.bat
+```
+
+Yardim ekrani:
+
+```powershell
+.\hss_sistem.exe --help
+```
+
+Testler:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Eger bunlar calisiyorsa temel kurulum buyuk olcude hazirdir.
 
 ## Su an en uygun calisma ortami
 
@@ -245,12 +398,31 @@ Temel runtime ayarlari [config/runtime_config.json](/C:/Users/askan/Desktop/KORG
 Buradan su tip ayarlari yonetebilirsin:
 
 - izlenecek ve referans siniflar
+- hedef profilleri ve kilit mesafe pencereleri
 - detector ve tracker threshold'lari
 - IoU esitleri ve track yasami
 - kamera index'i
 - log ve recording klasorleri
 - worker yeniden baslatma siniri
 - pencere gosterimi ve recording acik/kapali durumu
+
+Yeni hedef profili yapisinda her hedef icin su alanlar tanimlanabilir:
+
+- `ad`
+- `etiket`
+- `gorunen_ad`
+- `gercek_genislik_cm`
+- `min_kilit_mesafe_m`
+- `max_kilit_mesafe_m`
+- `oncelik`
+
+Boylece `drone`, `f16`, `rocket` gibi hedefler icin farkli kilit pencereleri tanimlanabilir. Ornek bir gorev profili dosyasi olarak [config/runtime_config_mission_targets.example.json](/C:/Users/askan/Desktop/KORGAN/config/runtime_config_mission_targets.example.json:1) eklendi.
+
+Not:
+
+- mevcut varsayilan model paketi hala COCO etiketleri ile geliyor
+- yani `drone`, `f16`, `rocket` profillerinin gercekten eslesmesi icin kullandigin `labels.txt` ve modelin bu siniflari icermesi gerekir
+- mevcut pakette buna en yakin etiket sadece `airplane` tarafidir
 
 ## Model paketi mantigi
 
@@ -298,11 +470,12 @@ Calisma sirasinda sistem:
 
 Terminal satirinda gorulen alanlar genel olarak sunlari ifade eder:
 
-- `DURUM`: Takip durumu (`BEKLENIYOR`, `IZLENIYOR`, `BELIRSIZ`)
+- `DURUM`: Takip durumu (`BEKLENIYOR`, `IZLENIYOR`, `KILIT_HAZIR`, `BELIRSIZ`)
 - `X`, `Y`: Hedef merkezi
 - `Z`: Yaklasik mesafe
 - `T`: Track ID
 - `CONF`: Guven skoru
+- `KILIT`: hedef tanimli mesafe penceresinde mi
 - `HEALTH`: Takip sagligi
 - `RT`, `DEC`, `PRE`, `INF`, `POST`, `TRK`, `DRW`, `FRM`: pipeline gecikme metrikleri
 
@@ -317,12 +490,20 @@ Bu loglarda ozellikle su bilgiler yer alir:
 - takip durumu
 - hedef koordinatlari
 - yaklasik mesafe
+- kilit mesafe penceresi ve angajman uygunlugu
 - sinif ve etiket
 - confidence
 - track ID
 - worker restart sayisi
 - worker, tracker ve frame gecikmeleri
 - kayit aktifse video dosyasi bilgisi
+
+Loglari hizlica ozetlemek icin:
+
+```powershell
+python scripts\analyze_telemetry.py
+python scripts\analyze_telemetry.py --log logs\telemetry_20260430_164709.jsonl
+```
 
 ## Degistirilebilecek temel ayarlar
 
@@ -338,6 +519,8 @@ Asagidaki ayarlar artik agirlikli olarak [config/runtime_config.json](/C:/Users/
 - `detection.nms_threshold`
 - `tracking.track_match_iou_threshold`
 - `tracking.track_max_missed_frames`
+- `tracking.kilit_icin_mesafe_zorunlu`
+- `tracking.kilit_aralik_bonus`
 - `runtime.camera_index`
 - `runtime.enable_recording`
 
