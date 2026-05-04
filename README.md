@@ -264,8 +264,8 @@ Manifest dosyasi, modelin hangi dosya adiyla yuklenecegini ve input/output bekle
 
 Not:
 
-- `.gitignore` dosyasi geregi `*.onnx`, `*.pt` ve bazi buyuk cikti dosyalari Git tarafinda ignore edilir.
-- Repo'yu baska bir makinede klonlarsan model dosyalarini manuel olarak tekrar koyman gerekebilir.
+- `.gitignore` dosyasi genel olarak `*.onnx`, `*.pt` ve bazi buyuk cikti dosyalarini ignore eder; paket icin gereken `deliverables/model.onnx` ve `deliverables/onnxruntime_cpu_package/model.onnx` bu kuralin disindadir.
+- Repo klonlandiginda paketin icindeki `model.onnx`, `labels.txt` ve `model-manifest.json` dosyalari birlikte gelmelidir.
 - Bunun icin `deliverables/onnxruntime_cpu_package/` klasoru uygulamanin bekledigi temel yerdir.
 
 ## Jetson tarafi icin teknik not

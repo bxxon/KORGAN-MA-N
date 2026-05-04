@@ -34,6 +34,17 @@ class RuntimeFilesTest(unittest.TestCase):
         self.assertIn("model", data["files"])
         self.assertIn("labels", data["files"])
 
+    def test_model_package_files_exist(self) -> None:
+        required_files = ("model.onnx", "labels.txt", "model-manifest.json")
+        package_dirs = (
+            REPO_ROOT / "deliverables",
+            REPO_ROOT / "deliverables" / "onnxruntime_cpu_package",
+        )
+
+        for package_dir in package_dirs:
+            for filename in required_files:
+                file_path = package_dir / filename
+                self.assertTrue(file_path.exists(), f"Missing runtime file: {file_path}")
 
 if __name__ == "__main__":
     unittest.main()
