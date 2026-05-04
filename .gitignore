@@ -19,5 +19,7 @@ build/
 c_cpp_properties.json
 
 *.onnx
+!deliverables/model.onnx
+!deliverables/onnxruntime_cpu_package/model.onnx
 *.pt
 deliverables/*.zip
